@@ -10,7 +10,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-# ページ基本設定（スマホ表示向け）
+# ページ基本設定
 st.set_page_config(page_title="投球動作解析アプリ", layout="centered")
 st.title("⚾️ 投球動作並進速度解析")
 
@@ -23,22 +23,20 @@ marker_body_m = st.sidebar.number_input("体幹ARマーカーサイズ (m)", val
 uploaded_file = st.file_uploader("スマホで撮影した動画を選択してください", type=["mov", "mp4"])
 
 if uploaded_file is not None:
-    # 一時ファイルとして保存
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mov')
     tfile.write(uploaded_file.read())
     video_path = tfile.name
 
     st.info("解析を実行中...（数十秒かかります）")
     
-    # ─── ここから解析処理 ───
     MARKER_BODY_M = marker_body_m
     MARKER_ARM_M  = 0.03
 
+    # ArUco 検出器の設定（バージョン互換性対応）
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    parameters = cv2.aruco.DetectorParameters()
-    aruco_detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+    parameters = cv2.aruco.DetectorParameters() if hasattr(cv2.aruco, 'DetectorParameters') else cv2.aruco.DetectorParameters_create()
 
-    # モデルファイルが手元にない場合、公式サーバーから自動ダウンロード
+    # モデルファイルの自動ダウンロード
     model_path = 'pose_landmarker_heavy.task'
     if not os.path.exists(model_path):
         url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
@@ -73,7 +71,14 @@ if uploaded_file is not None:
         raw_frames.append(frame)
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = aruco_detector.detectMarkers(gray)
+        
+        # ArUco 検出の呼び出し互換性処理
+        if hasattr(cv2.aruco, 'ArucoDetector'):
+            aruco_detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+            corners, ids, _ = aruco_detector.detectMarkers(gray)
+        else:
+            corners, ids, _ = cv2.aruco.detectMarkers(gray, dictionary, parameters=parameters)
+
         body_m_per_px, arm_m_per_px = None, None
         
         if ids is not None and len(corners) > 0:
@@ -102,6 +107,10 @@ if uploaded_file is not None:
     cap.release()
     num_frames = len(landmarks_list)
 
+    if num_frames == 0:
+        st.error("動画フレームを読み込めませんでした。別の動画を試してください。")
+        st.stop()
+
     # 補完処理
     def fill_scales(arr):
         last_val = 0.001
@@ -112,7 +121,6 @@ if uploaded_file is not None:
 
     scale_body_per_frame = fill_scales(scale_body_per_frame)
     
-    # 全フレーム中央値で固定
     valid_scales = [s for s in scale_body_per_frame if s > 0]
     if valid_scales:
         scale_body_per_frame = [np.median(valid_scales)] * num_frames
@@ -139,24 +147,37 @@ if uploaded_file is not None:
         if 25 in p_c:
             leg_height_px[f] = -p_c[25][1]
 
+    # 平滑化処理（フレーム数に応じた安全性対策）
     def clean_signal(arr):
-        smoothed = savgol_filter(arr, 15, 2)
+        window_length = 15
+        if len(arr) <= window_length:
+            window_length = len(arr) if len(arr) % 2 != 0 else len(arr) - 1
+        if window_length >= 3:
+            smoothed = savgol_filter(arr, window_length, 2)
+        else:
+            smoothed = arr
         smoothed[smoothed < 0] = 0.0
         return smoothed
 
     v_pelvis = clean_signal(raw_pelvis)
     v_thorax = clean_signal(raw_thorax)
-    v_pelvis[500:] = 0
-    v_thorax[500:] = 0
+    
+    if num_frames > 500:
+        v_pelvis[500:] = 0
+        v_thorax[500:] = 0
 
     # ピーク抽出
     search_start = int(num_frames * 0.1)
     search_end   = int(num_frames * 0.65)
-    target_heights = leg_height_px[search_start:search_end]
-    peaks, _ = find_peaks(target_heights, distance=30, prominence=20)
+    
+    if search_end > search_start:
+        target_heights = leg_height_px[search_start:search_end]
+        peaks, _ = find_peaks(target_heights, distance=min(30, max(1, len(target_heights)//2)), prominence=20)
+        leg_up_frame = search_start + (peaks[-1] if len(peaks) > 0 else np.argmax(target_heights))
+    else:
+        leg_up_frame = 0
 
-    leg_up_frame = search_start + (peaks[-1] if len(peaks) > 0 else np.argmax(target_heights))
-    pelvis_v_at_legup = v_pelvis[leg_up_frame]
+    pelvis_v_at_legup = v_pelvis[leg_up_frame] if leg_up_frame < len(v_pelvis) else 0.0
 
     # 結果表示
     st.success("解析が完了しました！")
