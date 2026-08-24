@@ -40,6 +40,90 @@ if uploaded_file is not None:
     out_w = target_w * 2
     out_h = target_h
 
+    # 一時出力動画ファイルの設定
+    output_path = os.path.join(tempfile.gettempdir(), "analyzed_output.mp4")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(output_path, fourcc, fps, (out_w, out_h))
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    status_text.text("動画を解析・生成中...")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    current_frame = 0
+
+    # Poseモデルの呼び出し
+    with mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=1,
+        smooth_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as pose:
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # リサイズ
+            frame_resized = cv2.resize(frame, (target_w, target_h))
+
+            # 黒背景画像の作成（右画面用）
+            black_bg = np.zeros_like(frame_resized)
+
+            # BGR -> RGB
+            image_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+            image_rgb.flags.writeable = False
+
+            results = pose.process(image_rgb)
+
+            # 描画用に複製
+            frame_drawn = frame_resized.copy()
+
+            if results.pose_landmarks:
+                # 左画面：実映像上に骨格描画
+                mp_drawing.draw_landmarks(
+                    frame_drawn,
+                    results.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
+                    mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=2)
+                )
+
+                # 右画面：黒背景上に骨格描画 (ワイヤーフレーム風)
+                mp_drawing.draw_landmarks(
+                    black_bg,
+                    results.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=2, circle_radius=3), # 黄色関節
+                    mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2)  # 赤骨格
+                )
+
+            # 左右に並べて結合
+            combined_frame = np.hstack((frame_drawn, black_bg))
+
+            # 動画ファイルに書き込み
+            out.write(combined_frame)
+
+            # 進捗バーの更新
+            current_frame += 1
+            if total_frames > 0:
+                progress_bar.progress(min(current_frame / total_frames, 1.0))
+
+    cap.release()
+    out.release()
+
+    status_text.text("解析完了！再生中...")
+    progress_bar.empty()
+
+    # 生成した動画を表示
+    st.video(output_path)    target_w = 480
+    target_h = int(height * (target_w / width))
+    # 左右2画面並べるため、出力幅は2倍
+    out_w = target_w * 2
+    out_h = target_h
+
     # 一時出力動画ファイルの設定 (mp4v コーデック)
     output_path = os.path.join(tempfile.gettempdir(), "analyzed_output.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
