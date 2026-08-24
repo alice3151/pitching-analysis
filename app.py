@@ -37,8 +37,16 @@ if uploaded_file is not None:
     parameters = cv2.aruco.DetectorParameters()
     aruco_detector = cv2.aruco.ArucoDetector(dictionary, parameters)
 
-    model_path = 'pose_landmarker_heavy.task'
-    base_options = python.BaseOptions(model_asset_path=model_path)
+   import os
+import urllib.request
+
+# モデルファイルが手元にない場合、公式サーバーから自動ダウンロード
+model_path = 'pose_landmarker_heavy.task'
+if not os.path.exists(model_path):
+    url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
+    urllib.request.urlretrieve(url, model_path)
+
+base_options = python.BaseOptions(model_asset_path=model_path)
     options = vision.PoseLandmarkerOptions(
         base_options=base_options,
         running_mode=vision.RunningMode.IMAGE,
