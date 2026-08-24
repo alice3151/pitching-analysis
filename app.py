@@ -1,10 +1,11 @@
-import streamlit as st
+import os
+import urllib.request
+import tempfile
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, find_peaks
-import tempfile
-import os
+import streamlit as st
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -29,7 +30,7 @@ if uploaded_file is not None:
 
     st.info("解析を実行中...（数十秒かかります）")
     
-    # ─── ここから既存の解析処理 ───
+    # ─── ここから解析処理 ───
     MARKER_BODY_M = marker_body_m
     MARKER_ARM_M  = 0.03
 
@@ -37,16 +38,13 @@ if uploaded_file is not None:
     parameters = cv2.aruco.DetectorParameters()
     aruco_detector = cv2.aruco.ArucoDetector(dictionary, parameters)
 
-   import os
-import urllib.request
+    # モデルファイルが手元にない場合、公式サーバーから自動ダウンロード
+    model_path = 'pose_landmarker_heavy.task'
+    if not os.path.exists(model_path):
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
+        urllib.request.urlretrieve(url, model_path)
 
-# モデルファイルが手元にない場合、公式サーバーから自動ダウンロード
-model_path = 'pose_landmarker_heavy.task'
-if not os.path.exists(model_path):
-    url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
-    urllib.request.urlretrieve(url, model_path)
-
-base_options = python.BaseOptions(model_asset_path=model_path)
+    base_options = python.BaseOptions(model_asset_path=model_path)
     options = vision.PoseLandmarkerOptions(
         base_options=base_options,
         running_mode=vision.RunningMode.IMAGE,
