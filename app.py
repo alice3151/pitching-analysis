@@ -2,7 +2,18 @@ import os
 import urllib.request
 import tempfile
 import cv2
-import numpy as np
+import mediapipe as mp
+
+# MediaPipe Pose の初期化（CPUで動作します）
+mp_pose = mp.solutions.pose
+pose = mp.pose.Pose(
+    static_image_mode=False,
+    model_complexity=1,       # 0:軽量, 1:標準, 2:高精度（Streamlit Cloudでは 1 以下がおすすめ）
+    smooth_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, find_peaks
 import streamlit as st
