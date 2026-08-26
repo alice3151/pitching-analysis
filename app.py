@@ -5,6 +5,7 @@ import mediapipe as mp
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+from scipy.signal import savgol_filter
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
@@ -40,8 +41,8 @@ show_grf = st.sidebar.checkbox("地面反力(GRF)ベクトル表示", value=True
 
 uploaded_file = st.file_uploader("📁 解析する投球動画を選択してください (MP4, MOV, AVI)", type=["mp4", "mov", "avi"])
 
-# スティックモデル ＋ 両足地面反力(GRF)描画関数
-def draw_advanced_skeleton(img, landmarks, p_speed=0.0):
+# 提示されたPythonコードと同等のGRF描画ロジック
+def draw_advanced_skeleton(img, landmarks, frame_idx, show_grf=True):
     h, w, _ = img.shape
     def get_pt(idx):
         lm = landmarks[idx]
@@ -80,27 +81,19 @@ def draw_advanced_skeleton(img, landmarks, p_speed=0.0):
     for p1, p2, col, thick in lines:
         cv2.line(img, p1, p2, col, thick, cv2.LINE_AA)
 
-    # 足型プレート塗りつぶし
-    r_foot_poly = np.array([r_ankle, r_heel, r_foot], np.int32)
-    l_foot_poly = np.array([l_ankle, l_heel, l_foot], np.int32)
-    cv2.fillPoly(img, [r_foot_poly], (0, 0, 180))
-    cv2.fillPoly(img, [l_foot_poly], (180, 180, 0))
-
-    # 両足の地面反力(GRF)ベクトル描画（以前の描画スタイルを再現）
-    if show_grf and p_speed > 0.05:
-        # 右足GRF（赤矢印）
-        r_base = ((r_ankle[0] + r_foot[0]) // 2, (r_ankle[1] + r_foot[1]) // 2)
-        r_len = int(min(p_speed * 20, 100))
-        if r_len > 10:
-            cv2.arrowedLine(img, r_base, (r_base[0] - int(r_len*0.3), r_base[1] - r_len), (0, 0, 255), 4, tipLength=0.3, line_type=cv2.LINE_AA)
-            cv2.putText(img, "GRF", (r_base[0] - 25, r_base[1] - r_len - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
-
-        # 左足GRF（黄矢印）
-        l_base = ((l_ankle[0] + l_foot[0]) // 2, (l_ankle[1] + l_foot[1]) // 2)
-        l_len = int(min(p_speed * 18, 90))
-        if l_len > 10:
-            cv2.arrowedLine(img, l_base, (l_base[0] + int(l_len*0.2), l_base[1] - l_len), (0, 255, 255), 4, tipLength=0.3, line_type=cv2.LINE_AA)
-            cv2.putText(img, "GRF", (l_base[0] + 5, l_base[1] - l_len - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2)
+    # ★ 元コードのフレーム条件分岐によるGRF描画
+    if show_grf:
+        if frame_idx < 410:
+            foot_pt = r_ankle
+            arrow_end = (foot_pt[0] - 10, foot_pt[1] - 70)
+            cv2.arrowedLine(img, foot_pt, arrow_end, (0, 0, 255), 4, tipLength=0.25)
+            cv2.putText(img, "GRF", (arrow_end[0] - 15, arrow_end[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        elif 410 <= frame_idx <= 490:
+            foot_pt = l_ankle
+            if foot_pt[1] > h * 0.6:
+                arrow_end = (foot_pt[0] - 30, foot_pt[1] - 90)
+                cv2.arrowedLine(img, foot_pt, arrow_end, (0, 0, 255), 4, tipLength=0.25)
+                cv2.putText(img, "GRF", (arrow_end[0] - 15, arrow_end[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
     shoulder_center = ((r_shoulder[0] + l_shoulder[0]) // 2, (r_shoulder[1] + l_shoulder[1]) // 2)
     head_radius = max(int(np.linalg.norm(np.array(r_shoulder) - np.array(l_shoulder)) * 0.4), 12)
@@ -121,16 +114,12 @@ def calculate_rotation_angle(p1, p2):
     dz = p2.z - p1.z
     return np.degrees(np.arctan2(dz, dx))
 
-# 最適化した平滑化（骨盤のピークを殺さない調整）
-def numpy_smooth_filter(data_list, window=3):
-    arr = np.array(data_list, dtype=np.float64)
-    if len(arr) < window:
-        return arr
-    kernel = np.ones(window) / window
-    smoothed = np.convolve(arr, kernel, mode='same')
-    smoothed[0] = arr[0]
-    smoothed[-1] = arr[-1]
-    return np.maximum(smoothed, 0)
+def clean_signal(arr):
+    if len(arr) < 15:
+        return np.array(arr)
+    smoothed = savgol_filter(arr, 15, 2)
+    smoothed[smoothed < 0] = 0.0
+    return smoothed
 
 if uploaded_file is not None:
     suffix = "." + uploaded_file.name.split(".")[-1]
@@ -208,7 +197,7 @@ if uploaded_file is not None:
                 prev_pelvis_angle, prev_thorax_angle = p_angle, t_angle
 
                 mp_drawing.draw_landmarks(frame_drawn, results.pose_landmarks, mp_pose.POSE_CONNECTIONS, style_left_node, style_left_edge)
-                draw_advanced_skeleton(black_bg, landmarks, p_speed=p_trans_speed)
+                draw_advanced_skeleton(black_bg, landmarks, current_frame, show_grf=show_grf)
 
             else:
                 p_trans_speed, t_trans_speed = 0.0, 0.0
@@ -230,11 +219,10 @@ if uploaded_file is not None:
     status_text.text("✅ 解析完了！")
     progress_bar.empty()
 
-    # 平滑化処理
-    p_trans_smooth = numpy_smooth_filter(pelvis_trans_raw, window=3)
-    t_trans_smooth = numpy_smooth_filter(thorax_trans_raw, window=3)
-    p_rot_smooth = numpy_smooth_filter(pelvis_rot_raw, window=3)
-    t_rot_smooth = numpy_smooth_filter(thorax_rot_raw, window=3)
+    p_trans_smooth = clean_signal(pelvis_trans_raw)
+    t_trans_smooth = clean_signal(thorax_trans_raw)
+    p_rot_smooth = clean_signal(pelvis_rot_raw)
+    t_rot_smooth = clean_signal(thorax_rot_raw)
 
     col1, col2 = st.columns([2, 1])
     with col1:
