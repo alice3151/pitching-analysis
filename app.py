@@ -6,7 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-# ページ基本設定 & カスタムCSS（かっこいいダークテーマデザイン）
+# ページ基本設定 & カスタムCSS（可読性向上・ダークモード対応）
 st.set_page_config(
     page_title="PITCHING KINETIC ANALYSIS",
     page_icon="⚾",
@@ -15,12 +15,28 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* メイン背景とフォント */
+    /* 全体背景と標準テキスト */
     .stApp {
         background-color: #0e1117;
-        color: #ffffff;
     }
-    /* ヘッダーデザイン */
+    
+    /* 読みにくくなっていたテキストの色を明瞭な白色に補正 */
+    h1, h2, h3, h4, h5, h6, p, label, .stMarkdown {
+        color: #f0f2f6 !important;
+    }
+
+    /* Metric（数値を表示するパーツ）の文字色調整 */
+    [data-testid="stMetricLabel"] {
+        color: #b0b8c4 !important;
+        font-size: 0.95rem !important;
+    }
+    [data-testid="stMetricValue"] {
+        color: #00E5FF !important;
+        font-size: 2.2rem !important;
+        font-weight: 700 !important;
+    }
+
+    /* タイトルのグラデーション */
     .main-title {
         font-size: 2.2rem;
         font-weight: 800;
@@ -30,18 +46,9 @@ st.markdown("""
         margin-bottom: 0px;
     }
     .sub-title {
-        color: #888888;
+        color: #a0aec0 !important;
         font-size: 0.95rem;
         margin-bottom: 25px;
-    }
-    /* カード風コンテナ */
-    .css-card {
-        background-color: #1a1f2c;
-        border-radius: 12px;
-        padding: 20px;
-        border: 1px solid #2d3748;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-        margin-bottom: 20px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -61,7 +68,7 @@ uploaded_file = st.file_uploader(
     "📁 解析する投球動画を選択してください (MP4, MOV, AVI)", type=["mp4", "mov", "avi"]
 )
 
-# 高機能骨格描画関数（足の形・ArUco風二重リング対応）
+# 骨格描画関数
 def draw_advanced_skeleton(img, landmarks):
     h, w, _ = img.shape
     
@@ -70,7 +77,6 @@ def draw_advanced_skeleton(img, landmarks):
         return (int(lm.x * w), int(lm.y * h))
 
     try:
-        # 主要関節の取得
         r_shoulder, l_shoulder = get_pt(12), get_pt(11)
         r_elbow, l_elbow = get_pt(14), get_pt(13)
         r_wrist, l_wrist = get_pt(16), get_pt(15)
@@ -83,31 +89,25 @@ def draw_advanced_skeleton(img, landmarks):
     except:
         return
 
-    # カラー定義 (BGR)
-    col_body = (0, 165, 255)    # 胴体: オレンジ
-    col_right = (0, 0, 255)     # 右半身: 赤
-    col_left = (255, 255, 0)    # 左半身: シアン
-    col_joint = (0, 255, 255)   # 関節: 黄色
-    col_head = (255, 255, 0)    # 頭部: 薄シアン
+    col_body = (0, 165, 255)
+    col_right = (0, 0, 255)
+    col_left = (255, 255, 0)
+    col_joint = (0, 255, 255)
+    col_head = (255, 255, 0)
 
-    # 1. 骨格リンク描画
     lines = [
-        # 胴体
         (r_shoulder, l_shoulder, col_body, 4),
         (r_shoulder, r_hip, col_body, 4),
         (l_shoulder, l_hip, col_body, 4),
         (r_hip, l_hip, col_body, 4),
-        # 右腕・左腕
         (r_shoulder, r_elbow, col_right, 4),
         (r_elbow, r_wrist, col_right, 4),
         (l_shoulder, l_elbow, col_left, 4),
         (l_elbow, l_wrist, col_left, 4),
-        # 右脚・左脚
         (r_hip, r_knee, col_right, 4),
         (r_knee, r_ankle, col_right, 4),
         (l_hip, l_knee, col_left, 4),
         (l_knee, l_ankle, col_left, 4),
-        # 足の形（足首 -> かかと -> つま先 -> 足首のポリゴン）
         (r_ankle, r_heel, col_right, 3),
         (r_heel, r_foot, col_right, 3),
         (r_foot, r_ankle, col_right, 3),
@@ -119,13 +119,11 @@ def draw_advanced_skeleton(img, landmarks):
     for p1, p2, col, thick in lines:
         cv2.line(img, p1, p2, col, thick, cv2.LINE_AA)
 
-    # 2. 足のプレート塗りつぶし（足の形を強調）
     r_foot_poly = np.array([r_ankle, r_heel, r_foot], np.int32)
     l_foot_poly = np.array([l_ankle, l_heel, l_foot], np.int32)
     cv2.fillPoly(img, [r_foot_poly], (0, 0, 180))
     cv2.fillPoly(img, [l_foot_poly], (180, 180, 0))
 
-    # 3. 頭部（円）の描画
     shoulder_center = ((r_shoulder[0] + l_shoulder[0]) // 2, (r_shoulder[1] + l_shoulder[1]) // 2)
     head_radius = int(np.linalg.norm(np.array(r_shoulder) - np.array(l_shoulder)) * 0.4)
     head_radius = max(head_radius, 12)
@@ -134,13 +132,12 @@ def draw_advanced_skeleton(img, landmarks):
     cv2.circle(img, head_center, head_radius, col_head, 3, cv2.LINE_AA)
     cv2.line(img, head_center, shoulder_center, col_body, 3, cv2.LINE_AA)
 
-    # 4. ArUco風二重マーカー関節
     joints = [r_shoulder, l_shoulder, r_elbow, l_elbow, r_wrist, l_wrist,
               r_hip, l_hip, r_knee, l_knee, r_ankle, l_ankle, r_foot, l_foot]
     for j in joints:
         cv2.circle(img, j, 7, col_joint, -1, cv2.LINE_AA)
         if show_markers:
-            cv2.circle(img, j, 11, (255, 255, 255), 2, cv2.LINE_AA) # 外枠白リング
+            cv2.circle(img, j, 11, (255, 255, 255), 2, cv2.LINE_AA)
 
 
 if uploaded_file is not None:
@@ -158,11 +155,8 @@ if uploaded_file is not None:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # 上下配置のため、1画面あたりの横幅を広めの 854px (16:9 相当) にリサイズ
     target_w = 854
     target_h = int(height * (target_w / width))
-    
-    # 上下2段にするため、出力縦サイズは 2倍
     out_w = target_w
     out_h = target_h * 2
 
@@ -212,13 +206,9 @@ if uploaded_file is not None:
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
 
-                # 上段：実映像上に骨格線
                 mp_drawing.draw_landmarks(frame_drawn, results.pose_landmarks, mp_pose.POSE_CONNECTIONS, style_left_node, style_left_edge)
-                
-                # 下段：黒背景上に足型＆ArUco風マーカー骨格
                 draw_advanced_skeleton(black_bg, landmarks)
 
-                # 地面反力・移動速度算出 (Pelvis & Thorax)
                 left_hip = np.array([landmarks[23].x, landmarks[23].y])
                 right_hip = np.array([landmarks[24].x, landmarks[24].y])
                 pelvis_pos = (left_hip + right_hip) / 2.0
@@ -245,7 +235,6 @@ if uploaded_file is not None:
 
             frame_numbers.append(current_frame)
 
-            # 上下に結合 (vstack)
             combined_frame = np.vstack((frame_drawn, black_bg))
             out.write(combined_frame)
 
@@ -259,7 +248,7 @@ if uploaded_file is not None:
     status_text.text("✅ 解析完了！")
     progress_bar.empty()
 
-    # --- アプリ画面のレンダリング ---
+    # レンダリングレイアウト
     col1, col2 = st.columns([2, 1])
 
     with col1:
@@ -281,9 +270,10 @@ if uploaded_file is not None:
 
         st.metric("Pelvis Peak Speed (骨盤最高速度)", f"{max_p_speed:.2f} a.u.")
         st.metric("Thorax Peak Speed (胸郭最高速度)", f"{max_t_speed:.2f} a.u.")
-        st.info("上段：実映像＋関節判定\n下段：足型プレート・ArUco風付き棒人間")
+        
+        st.info("💡 上段：実映像＋関節判定\n💡 下段：足型プレート・ArUco風付き棒人間")
 
-    # --- 地面反力・移動速度グラフ (下部) ---
+    # グラフ表示
     st.markdown("---")
     st.subheader("📈 Translational Speed (地面反力・移動速度グラフ)")
 
