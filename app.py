@@ -1,19 +1,11 @@
 import os
 import tempfile
 import cv2
+import mediapipe as mp
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
-
-# MediaPipe Solutions API の確実なインポート
-import mediapipe as mp
-try:
-    from mediapipe.python.solutions import pose as mp_pose
-    from mediapipe.python.solutions import drawing_utils as mp_drawing
-except ImportError:
-    import mediapipe.solutions.pose as mp_pose
-    import mediapipe.solutions.drawing_utils as mp_drawing
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
@@ -46,7 +38,7 @@ show_grf = st.sidebar.checkbox("地面反力(GRF)ベクトル表示", value=True
 
 uploaded_file = st.file_uploader("📁 解析する投球動画を選択してください (MP4, MOV, AVI)", type=["mp4", "mov", "avi"])
 
-# GRF描画ロジック（410F未満：右足、410F〜490F：左足接地時）
+# GRF描画ロジック
 def draw_advanced_skeleton(img, landmarks, frame_idx, show_grf=True):
     h, w, _ = img.shape
     def get_pt(idx):
@@ -86,7 +78,6 @@ def draw_advanced_skeleton(img, landmarks, frame_idx, show_grf=True):
     for p1, p2, col, thick in lines:
         cv2.line(img, p1, p2, col, thick, cv2.LINE_AA)
 
-    # 地面反力(GRF)描画ロジック
     if show_grf:
         if frame_idx < 410:
             foot_pt = r_ankle
@@ -159,6 +150,10 @@ if uploaded_file is not None:
 
     prev_pelvis_pos, prev_thorax_pos = None, None
     prev_pelvis_angle, prev_thorax_angle = None, None
+
+    # ★ 安全な呼び出しロジック
+    mp_pose = mp.solutions.pose
+    mp_drawing = mp.solutions.drawing_utils
 
     style_left_node = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=3, circle_radius=4)
     style_left_edge = mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=3)
