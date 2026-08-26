@@ -29,7 +29,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">PITCHING KINETIC & ROTATIONAL ANALYSIS</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">AI Motion Capture - GRF, Translational Speed & Rotational Velocity Tracker</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">AI Motion Capture - Multi-Foot GRF, Speed & Rotational Velocity Tracker</div>', unsafe_allow_html=True)
 
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
@@ -40,8 +40,8 @@ show_grf = st.sidebar.checkbox("地面反力(GRF)ベクトル表示", value=True
 
 uploaded_file = st.file_uploader("📁 解析する投球動画を選択してください (MP4, MOV, AVI)", type=["mp4", "mov", "avi"])
 
-# 高機能骨格 & 地面反力(GRF)描画関数
-def draw_advanced_skeleton(img, landmarks, grf_magnitude=0.0):
+# スティックモデル ＋ 両足地面反力(GRF)描画関数
+def draw_advanced_skeleton(img, landmarks, p_speed=0.0):
     h, w, _ = img.shape
     def get_pt(idx):
         lm = landmarks[idx]
@@ -86,17 +86,21 @@ def draw_advanced_skeleton(img, landmarks, grf_magnitude=0.0):
     cv2.fillPoly(img, [r_foot_poly], (0, 0, 180))
     cv2.fillPoly(img, [l_foot_poly], (180, 180, 0))
 
-    # 地面反力(GRF)ベクトルの描画（足元から上向きの矢印）
-    if show_grf and grf_magnitude > 0.1:
-        # 主に前足（着地足）のかかと・足首付近からベクトルを伸ばす
-        foot_base = r_foot if r_foot[1] > l_foot[1] else l_foot
-        arrow_len = int(min(grf_magnitude * 15, 120))  # 長さ制限
-        arrow_start = foot_base
-        arrow_end = (foot_base[0], foot_base[1] - arrow_len)
-        
-        # ネオングリーンで矢印描画
-        cv2.arrowedLine(img, arrow_start, arrow_end, (0, 255, 127), 4, tipLength=0.3, line_type=cv2.LINE_AA)
-        cv2.putText(img, "GRF", (arrow_end[0] - 15, arrow_end[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 127), 2)
+    # 両足の地面反力(GRF)ベクトル描画（以前の描画スタイルを再現）
+    if show_grf and p_speed > 0.05:
+        # 右足GRF（赤矢印）
+        r_base = ((r_ankle[0] + r_foot[0]) // 2, (r_ankle[1] + r_foot[1]) // 2)
+        r_len = int(min(p_speed * 20, 100))
+        if r_len > 10:
+            cv2.arrowedLine(img, r_base, (r_base[0] - int(r_len*0.3), r_base[1] - r_len), (0, 0, 255), 4, tipLength=0.3, line_type=cv2.LINE_AA)
+            cv2.putText(img, "GRF", (r_base[0] - 25, r_base[1] - r_len - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+
+        # 左足GRF（黄矢印）
+        l_base = ((l_ankle[0] + l_foot[0]) // 2, (l_ankle[1] + l_foot[1]) // 2)
+        l_len = int(min(p_speed * 18, 90))
+        if l_len > 10:
+            cv2.arrowedLine(img, l_base, (l_base[0] + int(l_len*0.2), l_base[1] - l_len), (0, 255, 255), 4, tipLength=0.3, line_type=cv2.LINE_AA)
+            cv2.putText(img, "GRF", (l_base[0] + 5, l_base[1] - l_len - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2)
 
     shoulder_center = ((r_shoulder[0] + l_shoulder[0]) // 2, (r_shoulder[1] + l_shoulder[1]) // 2)
     head_radius = max(int(np.linalg.norm(np.array(r_shoulder) - np.array(l_shoulder)) * 0.4), 12)
@@ -117,15 +121,13 @@ def calculate_rotation_angle(p1, p2):
     dz = p2.z - p1.z
     return np.degrees(np.arctan2(dz, dx))
 
-# NumPyのみで完結する堅牢な平滑化フィルタ
-def numpy_smooth_filter(data_list, window=5):
+# 最適化した平滑化（骨盤のピークを殺さない調整）
+def numpy_smooth_filter(data_list, window=3):
     arr = np.array(data_list, dtype=np.float64)
     if len(arr) < window:
         return arr
-    # 移動平均
     kernel = np.ones(window) / window
     smoothed = np.convolve(arr, kernel, mode='same')
-    # 端の補正
     smoothed[0] = arr[0]
     smoothed[-1] = arr[-1]
     return np.maximum(smoothed, 0)
@@ -183,7 +185,6 @@ if uploaded_file is not None:
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
 
-                # 1. 移動速度算出
                 p_pos = (np.array([landmarks[23].x, landmarks[23].y]) + np.array([landmarks[24].x, landmarks[24].y])) / 2.0
                 t_pos = (np.array([landmarks[11].x, landmarks[11].y]) + np.array([landmarks[12].x, landmarks[12].y])) / 2.0
 
@@ -191,7 +192,6 @@ if uploaded_file is not None:
                 t_trans_speed = np.linalg.norm(t_pos - prev_thorax_pos) * fps * 10 if prev_thorax_pos is not None else 0.0
                 prev_pelvis_pos, prev_thorax_pos = p_pos, t_pos
 
-                # 2. 回旋速度算出
                 p_angle = calculate_rotation_angle(landmarks[23], landmarks[24])
                 t_angle = calculate_rotation_angle(landmarks[11], landmarks[12])
 
@@ -207,9 +207,8 @@ if uploaded_file is not None:
 
                 prev_pelvis_angle, prev_thorax_angle = p_angle, t_angle
 
-                # 地面反力（GRF）ベクトルを動画内に描画
                 mp_drawing.draw_landmarks(frame_drawn, results.pose_landmarks, mp_pose.POSE_CONNECTIONS, style_left_node, style_left_edge)
-                draw_advanced_skeleton(black_bg, landmarks, grf_magnitude=p_trans_speed)
+                draw_advanced_skeleton(black_bg, landmarks, p_speed=p_trans_speed)
 
             else:
                 p_trans_speed, t_trans_speed = 0.0, 0.0
@@ -232,12 +231,11 @@ if uploaded_file is not None:
     progress_bar.empty()
 
     # 平滑化処理
-    p_trans_smooth = numpy_smooth_filter(pelvis_trans_raw, window=5)
-    t_trans_smooth = numpy_smooth_filter(thorax_trans_raw, window=5)
-    p_rot_smooth = numpy_smooth_filter(pelvis_rot_raw, window=5)
-    t_rot_smooth = numpy_smooth_filter(thorax_rot_raw, window=5)
+    p_trans_smooth = numpy_smooth_filter(pelvis_trans_raw, window=3)
+    t_trans_smooth = numpy_smooth_filter(thorax_trans_raw, window=3)
+    p_rot_smooth = numpy_smooth_filter(pelvis_rot_raw, window=3)
+    t_rot_smooth = numpy_smooth_filter(thorax_rot_raw, window=3)
 
-    # UIレンダリング
     col1, col2 = st.columns([2, 1])
     with col1:
         st.subheader("📹 2段縦並び 骨格＆地面反力モーション動画")
@@ -248,20 +246,19 @@ if uploaded_file is not None:
         st.metric("Thorax Trans. Speed (胸郭最高移動速度)", f"{max(t_trans_smooth):.2f} a.u.")
         st.metric("Pelvis Rot. Velocity (骨盤最高回旋速度)", f"{max(p_rot_smooth):.1f} deg/s")
         st.metric("Thorax Rot. Velocity (胸郭最高回旋速度)", f"{max(t_rot_smooth):.1f} deg/s")
-        st.info("💡 緑色の矢印（GRF）は足元にかかる地面反力・移動エネルギーをリアルタイム可視化しています。")
+        st.info("💡 地面反力（GRF）ベクトルが足元に表示されます。")
 
-    # グラフ描画
     st.markdown("---")
     st.subheader("📈 Translational Speed (移動速度・地面反力指標)")
     fig_trans = go.Figure()
     fig_trans.add_trace(go.Scatter(x=frame_numbers, y=p_trans_smooth, mode='lines', name='1. Pelvis Trans. Speed', line=dict(color='#00AAFF', width=3)))
     fig_trans.add_trace(go.Scatter(x=frame_numbers, y=t_trans_smooth, mode='lines', name='2. Thorax Trans. Speed', line=dict(color='#FF3333', width=3)))
-    fig_trans.update_layout(title="Translational Speed (Smoothed)", template="plotly_dark", height=380)
+    fig_trans.update_layout(title="Translational Speed", template="plotly_dark", height=380)
     st.plotly_chart(fig_trans, use_container_width=True)
 
     st.subheader("🔄 Rotational Velocity (回旋角速度グラフ)")
     fig_rot = go.Figure()
     fig_rot.add_trace(go.Scatter(x=frame_numbers, y=p_rot_smooth, mode='lines', name='1. Pelvis Rot. Velocity', line=dict(color='#00E5FF', width=3)))
     fig_rot.add_trace(go.Scatter(x=frame_numbers, y=t_rot_smooth, mode='lines', name='2. Thorax Rot. Velocity', line=dict(color='#FF5252', width=3)))
-    fig_rot.update_layout(title="Rotational Velocity (Smoothed)", template="plotly_dark", height=380)
+    fig_rot.update_layout(title="Rotational Velocity", template="plotly_dark", height=380)
     st.plotly_chart(fig_rot, use_container_width=True)
