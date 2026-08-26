@@ -6,10 +6,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
 
-# MediaPipe の確実な個別モジュールインポート
+# ★ 修正: 正しいモジュールパス指定（AttributeError / ModuleNotFoundError 両方を回避）
 import mediapipe as mp
-import mediapipe.python.solutions.pose as mp_pose
-import mediapipe.python.solutions.drawing_utils as mp_drawing
+import mediapipe.solutions.pose as mp_pose
+import mediapipe.solutions.drawing_utils as mp_drawing
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
@@ -159,7 +159,6 @@ if uploaded_file is not None:
     style_left_node = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=3, circle_radius=4)
     style_left_edge = mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=3)
 
-    # ★ 修正: 直接インポートした mp_pose を利用してクラス呼び出しエラーを完全に回避
     with mp_pose.Pose(static_image_mode=False, model_complexity=1, smooth_landmarks=True) as pose:
         while cap.isOpened():
             ret, frame = cap.read()
