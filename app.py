@@ -5,7 +5,6 @@ import mediapipe as mp
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
-from scipy.signal import savgol_filter
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
@@ -30,17 +29,19 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">PITCHING KINETIC & ROTATIONAL ANALYSIS</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">AI Motion Capture - Smoothed Translational Speed & Rotational Velocity Tracker</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">AI Motion Capture - GRF, Translational Speed & Rotational Velocity Tracker</div>', unsafe_allow_html=True)
 
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
 st.sidebar.header("⚙️ Analysis Settings")
 show_markers = st.sidebar.checkbox("ArUco風関節マーカー表示", value=True)
+show_grf = st.sidebar.checkbox("地面反力(GRF)ベクトル表示", value=True)
 
 uploaded_file = st.file_uploader("📁 解析する投球動画を選択してください (MP4, MOV, AVI)", type=["mp4", "mov", "avi"])
 
-def draw_advanced_skeleton(img, landmarks):
+# 高機能骨格 & 地面反力(GRF)描画関数
+def draw_advanced_skeleton(img, landmarks, grf_magnitude=0.0):
     h, w, _ = img.shape
     def get_pt(idx):
         lm = landmarks[idx]
@@ -79,10 +80,23 @@ def draw_advanced_skeleton(img, landmarks):
     for p1, p2, col, thick in lines:
         cv2.line(img, p1, p2, col, thick, cv2.LINE_AA)
 
+    # 足型プレート塗りつぶし
     r_foot_poly = np.array([r_ankle, r_heel, r_foot], np.int32)
     l_foot_poly = np.array([l_ankle, l_heel, l_foot], np.int32)
     cv2.fillPoly(img, [r_foot_poly], (0, 0, 180))
     cv2.fillPoly(img, [l_foot_poly], (180, 180, 0))
+
+    # 地面反力(GRF)ベクトルの描画（足元から上向きの矢印）
+    if show_grf and grf_magnitude > 0.1:
+        # 主に前足（着地足）のかかと・足首付近からベクトルを伸ばす
+        foot_base = r_foot if r_foot[1] > l_foot[1] else l_foot
+        arrow_len = int(min(grf_magnitude * 15, 120))  # 長さ制限
+        arrow_start = foot_base
+        arrow_end = (foot_base[0], foot_base[1] - arrow_len)
+        
+        # ネオングリーンで矢印描画
+        cv2.arrowedLine(img, arrow_start, arrow_end, (0, 255, 127), 4, tipLength=0.3, line_type=cv2.LINE_AA)
+        cv2.putText(img, "GRF", (arrow_end[0] - 15, arrow_end[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 127), 2)
 
     shoulder_center = ((r_shoulder[0] + l_shoulder[0]) // 2, (r_shoulder[1] + l_shoulder[1]) // 2)
     head_radius = max(int(np.linalg.norm(np.array(r_shoulder) - np.array(l_shoulder)) * 0.4), 12)
@@ -103,21 +117,18 @@ def calculate_rotation_angle(p1, p2):
     dz = p2.z - p1.z
     return np.degrees(np.arctan2(dz, dx))
 
-# ノイズ除去フィルタ（Savitzky-Golay & 平滑化）
-def apply_smooth_filter(data_list, window=7, polyorder=2):
-    arr = np.array(data_list)
+# NumPyのみで完結する堅牢な平滑化フィルタ
+def numpy_smooth_filter(data_list, window=5):
+    arr = np.array(data_list, dtype=np.float64)
     if len(arr) < window:
         return arr
-    # アウトライアー（異常な突発スパイク）のクリッピング
-    median = np.median(arr)
-    std = np.std(arr)
-    arr = np.clip(arr, 0, median + 4 * std)
-    # スムージング処理
-    try:
-        smoothed = savgol_filter(arr, window_length=window, polyorder=polyorder)
-        return np.maximum(smoothed, 0)
-    except:
-        return arr
+    # 移動平均
+    kernel = np.ones(window) / window
+    smoothed = np.convolve(arr, kernel, mode='same')
+    # 端の補正
+    smoothed[0] = arr[0]
+    smoothed[-1] = arr[-1]
+    return np.maximum(smoothed, 0)
 
 if uploaded_file is not None:
     suffix = "." + uploaded_file.name.split(".")[-1]
@@ -141,7 +152,7 @@ if uploaded_file is not None:
 
     progress_bar = st.progress(0)
     status_text = st.empty()
-    status_text.text("⚡ 骨格解析＆ノイズ除去フィルタ適用中...")
+    status_text.text("⚡ 骨格解析＆地面反力ベクトル描画中...")
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     current_frame = 0
@@ -171,10 +182,8 @@ if uploaded_file is not None:
 
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
-                mp_drawing.draw_landmarks(frame_drawn, results.pose_landmarks, mp_pose.POSE_CONNECTIONS, style_left_node, style_left_edge)
-                draw_advanced_skeleton(black_bg, landmarks)
 
-                # 移動速度
+                # 1. 移動速度算出
                 p_pos = (np.array([landmarks[23].x, landmarks[23].y]) + np.array([landmarks[24].x, landmarks[24].y])) / 2.0
                 t_pos = (np.array([landmarks[11].x, landmarks[11].y]) + np.array([landmarks[12].x, landmarks[12].y])) / 2.0
 
@@ -182,7 +191,7 @@ if uploaded_file is not None:
                 t_trans_speed = np.linalg.norm(t_pos - prev_thorax_pos) * fps * 10 if prev_thorax_pos is not None else 0.0
                 prev_pelvis_pos, prev_thorax_pos = p_pos, t_pos
 
-                # 回旋速度
+                # 2. 回旋速度算出
                 p_angle = calculate_rotation_angle(landmarks[23], landmarks[24])
                 t_angle = calculate_rotation_angle(landmarks[11], landmarks[12])
 
@@ -197,6 +206,10 @@ if uploaded_file is not None:
                     p_rot_speed, t_rot_speed = 0.0, 0.0
 
                 prev_pelvis_angle, prev_thorax_angle = p_angle, t_angle
+
+                # 地面反力（GRF）ベクトルを動画内に描画
+                mp_drawing.draw_landmarks(frame_drawn, results.pose_landmarks, mp_pose.POSE_CONNECTIONS, style_left_node, style_left_edge)
+                draw_advanced_skeleton(black_bg, landmarks, grf_magnitude=p_trans_speed)
 
             else:
                 p_trans_speed, t_trans_speed = 0.0, 0.0
@@ -215,27 +228,27 @@ if uploaded_file is not None:
 
     cap.release()
     out.release()
-    status_text.text("✅ 解析およびフィルタリング完了！")
+    status_text.text("✅ 解析完了！")
     progress_bar.empty()
 
-    # スムージング適用
-    p_trans_smooth = apply_smooth_filter(pelvis_trans_raw, window=5)
-    t_trans_smooth = apply_smooth_filter(thorax_trans_raw, window=5)
-    p_rot_smooth = apply_smooth_filter(pelvis_rot_raw, window=7)
-    t_rot_smooth = apply_smooth_filter(thorax_rot_raw, window=7)
+    # 平滑化処理
+    p_trans_smooth = numpy_smooth_filter(pelvis_trans_raw, window=5)
+    t_trans_smooth = numpy_smooth_filter(thorax_trans_raw, window=5)
+    p_rot_smooth = numpy_smooth_filter(pelvis_rot_raw, window=5)
+    t_rot_smooth = numpy_smooth_filter(thorax_rot_raw, window=5)
 
     # UIレンダリング
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.subheader("📹 2段縦並び 骨格比較モーション動画")
+        st.subheader("📹 2段縦並び 骨格＆地面反力モーション動画")
         st.video(output_path)
     with col2:
-        st.subheader("📊 解析サマリー (フィルタ補正済)")
+        st.subheader("📊 解析サマリー")
         st.metric("Pelvis Trans. Speed (骨盤最高移動速度)", f"{max(p_trans_smooth):.2f} a.u.")
         st.metric("Thorax Trans. Speed (胸郭最高移動速度)", f"{max(t_trans_smooth):.2f} a.u.")
         st.metric("Pelvis Rot. Velocity (骨盤最高回旋速度)", f"{max(p_rot_smooth):.1f} deg/s")
         st.metric("Thorax Rot. Velocity (胸郭最高回旋速度)", f"{max(t_rot_smooth):.1f} deg/s")
-        st.info("💡 ノイズフィルタ（Savitzky-Golay）により、極端なスパイク値を自動補正しています。")
+        st.info("💡 緑色の矢印（GRF）は足元にかかる地面反力・移動エネルギーをリアルタイム可視化しています。")
 
     # グラフ描画
     st.markdown("---")
@@ -250,5 +263,5 @@ if uploaded_file is not None:
     fig_rot = go.Figure()
     fig_rot.add_trace(go.Scatter(x=frame_numbers, y=p_rot_smooth, mode='lines', name='1. Pelvis Rot. Velocity', line=dict(color='#00E5FF', width=3)))
     fig_rot.add_trace(go.Scatter(x=frame_numbers, y=t_rot_smooth, mode='lines', name='2. Thorax Rot. Velocity', line=dict(color='#FF5252', width=3)))
-    fig_rot.update_layout(title="Rotational Velocity (Smoothed Filtered)", template="plotly_dark", height=380)
+    fig_rot.update_layout(title="Rotational Velocity (Smoothed)", template="plotly_dark", height=380)
     st.plotly_chart(fig_rot, use_container_width=True)
