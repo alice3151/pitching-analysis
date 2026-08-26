@@ -6,9 +6,9 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-# ページ基本設定 & カスタムCSS（可読性向上・ダークモード対応）
+# ページ基本設定 & カスタムCSS（高視認性ダークモード）
 st.set_page_config(
-    page_title="PITCHING KINETIC ANALYSIS",
+    page_title="PITCHING KINETIC & ROTATIONAL ANALYSIS",
     page_icon="⚾",
     layout="wide"
 )
@@ -20,19 +20,19 @@ st.markdown("""
         background-color: #0e1117;
     }
     
-    /* 読みにくくなっていたテキストの色を明瞭な白色に補正 */
+    /* テキストの色を明瞭な白色に補正 */
     h1, h2, h3, h4, h5, h6, p, label, .stMarkdown {
         color: #f0f2f6 !important;
     }
 
-    /* Metric（数値を表示するパーツ）の文字色調整 */
+    /* Metric（数値パーツ）の文字色調整 */
     [data-testid="stMetricLabel"] {
         color: #b0b8c4 !important;
-        font-size: 0.95rem !important;
+        font-size: 0.9rem !important;
     }
     [data-testid="stMetricValue"] {
         color: #00E5FF !important;
-        font-size: 2.2rem !important;
+        font-size: 2.0rem !important;
         font-weight: 700 !important;
     }
 
@@ -53,8 +53,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">PITCHING KINETIC ANALYSIS</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">AI Motion Capture & Ground Reaction / Translational Speed Tracker</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">PITCHING KINETIC & ROTATIONAL ANALYSIS</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">AI Motion Capture - Translational Speed & Rotational Velocity Tracker</div>', unsafe_allow_html=True)
 
 # MediaPipe Pose の初期化
 mp_pose = mp.solutions.pose
@@ -139,6 +139,13 @@ def draw_advanced_skeleton(img, landmarks):
         if show_markers:
             cv2.circle(img, j, 11, (255, 255, 255), 2, cv2.LINE_AA)
 
+# 回旋角度計算関数
+def calculate_rotation_angle(p1, p2):
+    dx = p2.x - p1.x
+    dz = p2.z - p1.z
+    angle_rad = np.arctan2(dz, dx)
+    return np.degrees(angle_rad)
+
 
 if uploaded_file is not None:
     suffix = "." + uploaded_file.name.split(".")[-1]
@@ -171,12 +178,21 @@ if uploaded_file is not None:
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     current_frame = 0
 
-    pelvis_speeds = []
-    thorax_speeds = []
+    # 移動速度用配列
+    pelvis_trans_speeds = []
+    thorax_trans_speeds = []
+
+    # 回旋角速度用配列
+    pelvis_rot_speeds = []
+    thorax_rot_speeds = []
+
     frame_numbers = []
 
-    prev_pelvis = None
-    prev_thorax = None
+    prev_pelvis_pos = None
+    prev_thorax_pos = None
+
+    prev_pelvis_angle = None
+    prev_thorax_angle = None
 
     style_left_node = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=3, circle_radius=4)
     style_left_edge = mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=3)
@@ -209,6 +225,7 @@ if uploaded_file is not None:
                 mp_drawing.draw_landmarks(frame_drawn, results.pose_landmarks, mp_pose.POSE_CONNECTIONS, style_left_node, style_left_edge)
                 draw_advanced_skeleton(black_bg, landmarks)
 
+                # --- 1. 移動速度（Translational Speed）算出 ---
                 left_hip = np.array([landmarks[23].x, landmarks[23].y])
                 right_hip = np.array([landmarks[24].x, landmarks[24].y])
                 pelvis_pos = (left_hip + right_hip) / 2.0
@@ -217,21 +234,47 @@ if uploaded_file is not None:
                 right_shoulder = np.array([landmarks[12].x, landmarks[12].y])
                 thorax_pos = (left_shoulder + right_shoulder) / 2.0
 
-                if prev_pelvis is not None:
-                    p_speed = np.linalg.norm(pelvis_pos - prev_pelvis) * fps * 10
-                    t_speed = np.linalg.norm(thorax_pos - prev_thorax) * fps * 10
+                if prev_pelvis_pos is not None:
+                    p_trans_speed = np.linalg.norm(pelvis_pos - prev_pelvis_pos) * fps * 10
+                    t_trans_speed = np.linalg.norm(thorax_pos - prev_thorax_pos) * fps * 10
                 else:
-                    p_speed = 0.0
-                    t_speed = 0.0
+                    p_trans_speed = 0.0
+                    t_trans_speed = 0.0
 
-                prev_pelvis = pelvis_pos
-                prev_thorax = thorax_pos
+                prev_pelvis_pos = pelvis_pos
+                prev_thorax_pos = thorax_pos
 
-                pelvis_speeds.append(p_speed)
-                thorax_speeds.append(t_speed)
+                pelvis_trans_speeds.append(p_trans_speed)
+                thorax_trans_speeds.append(t_trans_speed)
+
+                # --- 2. 回旋角速度（Rotational Velocity）算出 ---
+                pelvis_angle = calculate_rotation_angle(landmarks[23], landmarks[24])
+                thorax_angle = calculate_rotation_angle(landmarks[11], landmarks[12])
+
+                if prev_pelvis_angle is not None:
+                    d_pelvis = np.abs(pelvis_angle - prev_pelvis_angle)
+                    d_thorax = np.abs(thorax_angle - prev_thorax_angle)
+                    
+                    if d_pelvis > 180: d_pelvis = 360 - d_pelvis
+                    if d_thorax > 180: d_thorax = 360 - d_thorax
+
+                    p_rot_speed = d_pelvis * fps
+                    t_rot_speed = d_thorax * fps
+                else:
+                    p_rot_speed = 0.0
+                    t_rot_speed = 0.0
+
+                prev_pelvis_angle = pelvis_angle
+                prev_thorax_angle = thorax_angle
+
+                pelvis_rot_speeds.append(p_rot_speed)
+                thorax_rot_speeds.append(t_rot_speed)
+
             else:
-                pelvis_speeds.append(0.0)
-                thorax_speeds.append(0.0)
+                pelvis_trans_speeds.append(0.0)
+                thorax_trans_speeds.append(0.0)
+                pelvis_rot_speeds.append(0.0)
+                thorax_rot_speeds.append(0.0)
 
             frame_numbers.append(current_frame)
 
@@ -265,41 +308,73 @@ if uploaded_file is not None:
 
     with col2:
         st.subheader("📊 解析サマリー")
-        max_p_speed = max(pelvis_speeds) if pelvis_speeds else 0
-        max_t_speed = max(thorax_speeds) if thorax_speeds else 0
+        max_p_trans = max(pelvis_trans_speeds) if pelvis_trans_speeds else 0
+        max_t_trans = max(thorax_trans_speeds) if thorax_trans_speeds else 0
+        max_p_rot = max(pelvis_rot_speeds) if pelvis_rot_speeds else 0
+        max_t_rot = max(thorax_rot_speeds) if thorax_rot_speeds else 0
 
-        st.metric("Pelvis Peak Speed (骨盤最高速度)", f"{max_p_speed:.2f} a.u.")
-        st.metric("Thorax Peak Speed (胸郭最高速度)", f"{max_t_speed:.2f} a.u.")
+        st.metric("Pelvis Trans. Speed (骨盤最高移動速度)", f"{max_p_trans:.2f} a.u.")
+        st.metric("Thorax Trans. Speed (胸郭最高移動速度)", f"{max_t_trans:.2f} a.u.")
+        st.metric("Pelvis Rot. Velocity (骨盤最高回旋速度)", f"{max_p_rot:.1f} deg/s")
+        st.metric("Thorax Rot. Velocity (胸郭最高回旋速度)", f"{max_t_rot:.1f} deg/s")
         
         st.info("💡 上段：実映像＋関節判定\n💡 下段：足型プレート・ArUco風付き棒人間")
 
-    # グラフ表示
+    # --- グラフ描画（移動速度 & 回旋速度） ---
     st.markdown("---")
-    st.subheader("📈 Translational Speed (地面反力・移動速度グラフ)")
-
-    fig = go.Figure()
+    
+    # 1. 移動速度グラフ
+    st.subheader("📈 Translational Speed (移動速度・地面反力指標)")
+    fig_trans = go.Figure()
 
     window_size = 3
-    p_smooth = np.convolve(pelvis_speeds, np.ones(window_size)/window_size, mode='same')
-    t_smooth = np.convolve(thorax_speeds, np.ones(window_size)/window_size, mode='same')
+    p_trans_smooth = np.convolve(pelvis_trans_speeds, np.ones(window_size)/window_size, mode='same')
+    t_trans_smooth = np.convolve(thorax_trans_speeds, np.ones(window_size)/window_size, mode='same')
 
-    fig.add_trace(go.Scatter(
-        x=frame_numbers, y=p_smooth, mode='lines', 
-        name='1. Pelvis Trans. Speed (骨盤)', line=dict(color='#00AAFF', width=3)
+    fig_trans.add_trace(go.Scatter(
+        x=frame_numbers, y=p_trans_smooth, mode='lines', 
+        name='1. Pelvis Trans. Speed (骨盤移動速度)', line=dict(color='#00AAFF', width=3)
     ))
-    fig.add_trace(go.Scatter(
-        x=frame_numbers, y=t_smooth, mode='lines', 
-        name='2. Thorax Trans. Speed (胸郭)', line=dict(color='#FF3333', width=3)
+    fig_trans.add_trace(go.Scatter(
+        x=frame_numbers, y=t_trans_smooth, mode='lines', 
+        name='2. Thorax Trans. Speed (胸郭移動速度)', line=dict(color='#FF3333', width=3)
     ))
 
-    fig.update_layout(
+    fig_trans.update_layout(
         title="Translational Speed (m/s - AR Calibrated)",
         xaxis_title="Video Frame",
-        yaxis_title="Speed (m/s)",
+        yaxis_title="Speed (a.u.)",
         template="plotly_dark",
-        height=420,
+        height=380,
         margin=dict(l=40, r=40, t=50, b=40),
         legend=dict(x=0.01, y=0.99, bgcolor='rgba(0,0,0,0.5)')
     )
+    st.plotly_chart(fig_trans, use_container_width=True)
 
-    st.plotly_chart(fig, use_container_width=True)
+    # 2. 回旋角速度グラフ
+    st.subheader("🔄 Rotational Velocity (回旋角速度グラフ)")
+    fig_rot = go.Figure()
+
+    window_rot = 5
+    p_rot_smooth = np.convolve(pelvis_rot_speeds, np.ones(window_rot)/window_rot, mode='same')
+    t_rot_smooth = np.convolve(thorax_rot_speeds, np.ones(window_rot)/window_rot, mode='same')
+
+    fig_rot.add_trace(go.Scatter(
+        x=frame_numbers, y=p_rot_smooth, mode='lines', 
+        name='1. Pelvis Rot. Velocity (骨盤回旋速度)', line=dict(color='#00E5FF', width=3)
+    ))
+    fig_rot.add_trace(go.Scatter(
+        x=frame_numbers, y=t_rot_smooth, mode='lines', 
+        name='2. Thorax Rot. Velocity (胸郭回旋速度)', line=dict(color='#FF5252', width=3)
+    ))
+
+    fig_rot.update_layout(
+        title="Rotational Velocity (deg/s)",
+        xaxis_title="Video Frame",
+        yaxis_title="Angular Velocity (deg/s)",
+        template="plotly_dark",
+        height=380,
+        margin=dict(l=40, r=40, t=50, b=40),
+        legend=dict(x=0.01, y=0.99, bgcolor='rgba(0,0,0,0.5)')
+    )
+    st.plotly_chart(fig_rot, use_container_width=True)
