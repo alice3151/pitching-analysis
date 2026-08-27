@@ -5,11 +5,11 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
-
-# ★ 修正: 正しいモジュールパス指定（AttributeError / ModuleNotFoundError 両方を回避）
 import mediapipe as mp
-import mediapipe.solutions.pose as mp_pose
-import mediapipe.solutions.drawing_utils as mp_drawing
+
+# MediaPipe Solutions の正しい参照方法
+mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
