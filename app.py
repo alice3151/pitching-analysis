@@ -7,7 +7,7 @@ import streamlit as st
 from scipy.signal import savgol_filter
 import mediapipe as mp
 
-# MediaPipe Solutions の正しい参照方法
+# MediaPipe のモジュール参照（エラー回避の正しい記述）
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
