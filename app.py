@@ -8,6 +8,8 @@ from scipy.signal import savgol_filter
 
 # ★ 修正: MediaPipe の正しい参照方法
 import mediapipe as mp
+
+# mp.solutions ではなく直接Poseモジュール等を呼び出す修正例
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
