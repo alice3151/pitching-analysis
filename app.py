@@ -5,9 +5,9 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
-import mediapipe as mp
 
-# MediaPipe のモジュール参照（エラー回避の正しい記述）
+# ★ 修正: MediaPipe の正しい参照方法
+import mediapipe as mp
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
