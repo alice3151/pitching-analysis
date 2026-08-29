@@ -6,10 +6,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
 
-# ★ 修正: AttributeErrorを確実に回避するインポート記述
+# MediaPipe の正しいモジュール読み込み（両方のエラーを回避）
 import mediapipe as mp
-import mediapipe.python.solutions.pose as mp_pose
-import mediapipe.python.solutions.drawing_utils as mp_drawing
+
+mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils 
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
