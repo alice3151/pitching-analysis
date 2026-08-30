@@ -7,8 +7,13 @@ import streamlit as st
 from scipy.signal import savgol_filter
 
 import mediapipe as mp
-mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
+# ★ 明示的に solutions をインポートして参照します
+import mediapipe.python.solutions.pose as mp_pose
+import mediapipe.python.solutions.drawing_utils as mp_drawing
+
+# ※ もし上記でエラーが出る場合は、以下の2行に差し替えてみてください
+# from mediapipe.solutions import pose as mp_pose
+# from mediapipe.solutions import drawing_utils as mp_drawing
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
