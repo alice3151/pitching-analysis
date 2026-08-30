@@ -1,6 +1,6 @@
 streamlit
-mediapipe
 opencv-python-headless
 numpy
 plotly
 scipy
+--no-deps mediapipe
