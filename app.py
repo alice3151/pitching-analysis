@@ -1,15 +1,15 @@
 import os
 import tempfile
+import cv2
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
 
-# OpenCV と MediaPipe のインポート
-import cv2
+# MediaPipe の明示的インポート
 import mediapipe as mp
-from mediapipe.solutions import pose as mp_pose
-from mediapipe.solutions import drawing_utils as mp_drawing
+from mediapipe.python.solutions import pose as mp_pose
+from mediapipe.python.solutions import drawing_utils as mp_drawing
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
@@ -17,6 +17,7 @@ st.set_page_config(
     page_icon="⚾",
     layout="wide"
 )
+
 
 st.markdown("""
 <style>
