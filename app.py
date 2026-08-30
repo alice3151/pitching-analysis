@@ -1,14 +1,12 @@
 import os
 import tempfile
+import cv2
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
 
-# OpenCV と MediaPipe の安全なインポート順序
-import cv2
 import mediapipe as mp
-
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
