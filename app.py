@@ -6,10 +6,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
 
-# MediaPipe の明示的インポート
+# ★ 正しい MediaPipe の読み込み手順
 import mediapipe as mp
-from mediapipe.python.solutions import pose as mp_pose
-from mediapipe.python.solutions import drawing_utils as mp_drawing
+mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils
 
 # ページ基本設定 & カスタムCSS
 st.set_page_config(
