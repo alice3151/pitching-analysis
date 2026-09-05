@@ -8,7 +8,6 @@ from scipy.signal import savgol_filter
 
 import mediapipe as mp
 
-# スリープ復帰時の安全な初期化
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
