@@ -7,9 +7,16 @@ import streamlit as st
 from scipy.signal import savgol_filter
 
 import mediapipe as mp
-from mediapipe.solutions import pose as mp_pose
-from mediapipe.solutions import drawing_utils as mp_drawing
 
+# 遅延ロード・バージョン差異を回避する安全な取得方法
+mp_pose = getattr(mp, 'solutions', None)
+if mp_pose is not None:
+    mp_pose = mp.solutions.pose
+    mp_drawing = mp.solutions.drawing_utils
+else:
+    import mediapipe.python.solutions.pose as mp_pose
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
+    
 # --------------------------------------------------
 # ページ基本設定
 # --------------------------------------------------
