@@ -6,7 +6,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from scipy.signal import savgol_filter
 
+# MediaPipe のモジュールを直接明示的にインポート
 import mediapipe as mp
+import mediapipe.python.solutions.pose as mp_pose
+import mediapipe.python.solutions.drawing_utils as mp_drawing
 
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
