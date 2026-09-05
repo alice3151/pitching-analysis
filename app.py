@@ -10,6 +10,12 @@ mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
 # --------------------------------------------------
+# 骨格描画スタイルの設定（前と同じ太い描画に調整）
+# --------------------------------------------------
+LANDMARK_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=4, circle_radius=4)  # 関節 (シアン/太め)
+CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=4, circle_radius=2)  # ライン (白/太め)
+
+# --------------------------------------------------
 # ページ基本設定
 # --------------------------------------------------
 st.set_page_config(
@@ -50,17 +56,14 @@ if uploaded_file is not None:
 
     cap = cv2.VideoCapture(tfile.name)
     
-    # 元動画のスペック取得
     orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
 
-    # 解析後動画の保存用一時ファイル
     out_overlay_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
     out_skeleton_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
 
-    # mp4v コーデックで動画書き出し設定
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out_overlay = cv2.VideoWriter(out_overlay_path, fourcc, orig_fps, (width, height))
     out_skeleton = cv2.VideoWriter(out_skeleton_path, fourcc, orig_fps, (width, height))
@@ -68,7 +71,6 @@ if uploaded_file is not None:
     st.info("動画を解析・生成中...")
     progress_bar = st.progress(0)
 
-    # データの蓄積用
     wrist_history = []
     hip_velocities = []
     time_stamps = []
@@ -95,7 +97,6 @@ if uploaded_file is not None:
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
 
-                # 骨盤中心の計算
                 l_hip = landmarks[mp_pose.PoseLandmark.LEFT_HIP]
                 r_hip = landmarks[mp_pose.PoseLandmark.RIGHT_HIP]
                 hip_x = int(((l_hip.x + r_hip.x) / 2.0) * width)
@@ -114,8 +115,8 @@ if uploaded_file is not None:
                     wrist_pt = (int(wrist.x * width), int(wrist.y * height))
                     wrist_history.append(wrist_pt)
                     for i in range(1, len(wrist_history)):
-                        cv2.line(frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 3)
-                        cv2.line(black_frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 3)
+                        cv2.line(frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 4)
+                        cv2.line(black_frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 4)
 
                 elif analysis_mode == "簡易地面反力 (GRF) 推定":
                     ankle = landmarks[pivot_ankle_idx]
@@ -123,17 +124,25 @@ if uploaded_file is not None:
                     grf_x = hip_x - ankle_pt[0]
                     grf_y = hip_y - ankle_pt[1]
                     arrow_end = (ankle_pt[0] + grf_x, ankle_pt[1] + grf_y)
-                    cv2.arrowedLine(frame, ankle_pt, arrow_end, (0, 255, 255), 4, tipLength=0.2)
-                    cv2.arrowedLine(black_frame, ankle_pt, arrow_end, (0, 255, 255), 4, tipLength=0.2)
+                    cv2.arrowedLine(frame, ankle_pt, arrow_end, (0, 255, 255), 5, tipLength=0.2)
+                    cv2.arrowedLine(black_frame, ankle_pt, arrow_end, (0, 255, 255), 5, tipLength=0.2)
 
                 elif analysis_mode == "骨盤並進 (重心) 強調":
-                    cv2.circle(frame, (hip_x, hip_y), 10, (255, 0, 0), -1)
-                    cv2.circle(black_frame, (hip_x, hip_y), 10, (255, 0, 0), -1)
+                    cv2.circle(frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
+                    cv2.circle(black_frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
 
-                mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-                mp_drawing.draw_landmarks(black_frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                # 骨格線のスタイル（太さ・ドット）を指定して描画
+                mp_drawing.draw_landmarks(
+                    frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                    landmark_drawing_spec=LANDMARK_STYLE,
+                    connection_drawing_spec=CONNECTION_STYLE
+                )
+                mp_drawing.draw_landmarks(
+                    black_frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                    landmark_drawing_spec=LANDMARK_STYLE,
+                    connection_drawing_spec=CONNECTION_STYLE
+                )
 
-            # ファイルに書き出し
             out_overlay.write(frame)
             out_skeleton.write(black_frame)
             
@@ -145,9 +154,6 @@ if uploaded_file is not None:
 
     st.success("解析処理が完了しました！")
 
-    # --------------------------------------------------
-    # 動画プレイヤー & ダウンロード表示 (元の仕様を復元)
-    # --------------------------------------------------
     col1, col2 = st.columns(2)
     
     with col1:
@@ -162,9 +168,6 @@ if uploaded_file is not None:
         with open(out_skeleton_path, "rb") as f:
             st.download_button("🦴 骨格動画をダウンロード", f, file_name="analyzed_skeleton.mp4", mime="video/mp4")
 
-    # --------------------------------------------------
-    # グラフ表示
-    # --------------------------------------------------
     if len(hip_velocities) > 1:
         st.subheader("📈 骨盤並進 (重心) 速度グラフ")
         fig = go.Figure()
