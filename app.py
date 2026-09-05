@@ -7,9 +7,17 @@ import streamlit as st
 from scipy.signal import savgol_filter
 
 import mediapipe as mp
-from mediapipe.solutions import pose as mp_pose
-from mediapipe.solutions import drawing_utils as mp_drawing
 
+# 最新の MediaPipe Tasks API / または安全な参照
+# mp.solutions ではなく以下のように定義・取得します
+try:
+    import mediapipe.python.solutions.pose as mp_pose
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
+except ModuleNotFoundError:
+    # solutions が存在しない最新バージョンの場合の安全な読み込み
+    mp_pose = mp.tasks.vision.PoseLandmarker
+    mp_drawing = None
+    
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
