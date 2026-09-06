@@ -71,12 +71,13 @@ if uploaded_file is not None:
     pivot_ankle_idx = mp_pose.PoseLandmark.RIGHT_ANKLE if is_right else mp_pose.PoseLandmark.LEFT_ANKLE
 
     # --- 高精度モード & スムージングの有効化 ---
+    # model_complexity=1 に設定して動的ダウンロードによる PermissionError を回避
     with mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=2,           # 最高精度モデルを使用 (ブレを大幅軽減)
-        smooth_landmarks=True,         # フレーム間の骨格補正を有効化
-        min_detection_confidence=0.6,
-        min_tracking_confidence=0.6
+        model_complexity=1,           # 同梱済みの標準モデルを使用
+        smooth_landmarks=True,         # フレーム間の補正で精度を維持
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
     ) as pose:
         while cap.isOpened():
             ret, frame = cap.read()
