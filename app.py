@@ -9,15 +9,10 @@ import mediapipe as mp
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
-# --------------------------------------------------
-# 骨格描画スタイルの設定（前と同じ太い描画に調整）
-# --------------------------------------------------
-LANDMARK_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=4, circle_radius=4)  # 関節 (シアン/太め)
-CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=4, circle_radius=2)  # ライン (白/太め)
+# 骨格描画スタイル
+LANDMARK_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=4, circle_radius=4)
+CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=4, circle_radius=2)
 
-# --------------------------------------------------
-# ページ基本設定
-# --------------------------------------------------
 st.set_page_config(
     page_title="PITCHING KINETIC & ROTATIONAL ANALYSIS",
     page_icon="⚾",
@@ -26,9 +21,6 @@ st.set_page_config(
 
 st.title("⚾ ピッチング動作・運動力学解析")
 
-# --------------------------------------------------
-# サイドバー設定
-# --------------------------------------------------
 st.sidebar.header("⚙️ 解析・表示設定")
 
 analysis_mode = st.sidebar.radio(
@@ -45,9 +37,6 @@ video_fps_mode = st.sidebar.selectbox(
 fps_map = {"通常撮影 (30 fps)": 30, "スロー撮影 (60 fps)": 60, "ハイスピード (120 fps)": 120, "超スロー (240 fps)": 240}
 fps = fps_map[video_fps_mode]
 
-# --------------------------------------------------
-# 動画アップロード & 解析処理
-# --------------------------------------------------
 uploaded_file = st.file_uploader("動画ファイルをアップロードしてください (MP4 / MOV)", type=["mp4", "mov", "avi"])
 
 if uploaded_file is not None:
@@ -68,7 +57,7 @@ if uploaded_file is not None:
     out_overlay = cv2.VideoWriter(out_overlay_path, fourcc, orig_fps, (width, height))
     out_skeleton = cv2.VideoWriter(out_skeleton_path, fourcc, orig_fps, (width, height))
 
-    st.info("動画を解析・生成中...")
+    st.info("動画を解析・生成中 (高精度モード)...")
     progress_bar = st.progress(0)
 
     wrist_history = []
@@ -81,7 +70,14 @@ if uploaded_file is not None:
     wrist_idx = mp_pose.PoseLandmark.RIGHT_WRIST if is_right else mp_pose.PoseLandmark.LEFT_WRIST
     pivot_ankle_idx = mp_pose.PoseLandmark.RIGHT_ANKLE if is_right else mp_pose.PoseLandmark.LEFT_ANKLE
 
-    with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
+    # --- 高精度モード & スムージングの有効化 ---
+    with mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=2,           # 最高精度モデルを使用 (ブレを大幅軽減)
+        smooth_landmarks=True,         # フレーム間の骨格補正を有効化
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6
+    ) as pose:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -97,6 +93,7 @@ if uploaded_file is not None:
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
 
+                # 骨盤中心の計算
                 l_hip = landmarks[mp_pose.PoseLandmark.LEFT_HIP]
                 r_hip = landmarks[mp_pose.PoseLandmark.RIGHT_HIP]
                 hip_x = int(((l_hip.x + r_hip.x) / 2.0) * width)
@@ -109,14 +106,19 @@ if uploaded_file is not None:
                     time_stamps.append(current_time)
                 prev_hip_x = hip_x
 
-                # モード別描画
+                # --- モード別描画 ---
                 if analysis_mode == "テイクバック軌道追跡 (手首)":
                     wrist = landmarks[wrist_idx]
                     wrist_pt = (int(wrist.x * width), int(wrist.y * height))
                     wrist_history.append(wrist_pt)
-                    for i in range(1, len(wrist_history)):
-                        cv2.line(frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 4)
-                        cv2.line(black_frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 4)
+                    
+                    # 過去30フレーム（約1秒）分の軌跡のみ保持して画面破綻を防ぐ
+                    MAX_TRAIL = 30
+                    trail_pts = wrist_history[-MAX_TRAIL:]
+                    
+                    for i in range(1, len(trail_pts)):
+                        cv2.line(frame, trail_pts[i-1], trail_pts[i], (0, 0, 255), 4)
+                        cv2.line(black_frame, trail_pts[i-1], trail_pts[i], (0, 0, 255), 4)
 
                 elif analysis_mode == "簡易地面反力 (GRF) 推定":
                     ankle = landmarks[pivot_ankle_idx]
@@ -131,7 +133,6 @@ if uploaded_file is not None:
                     cv2.circle(frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
                     cv2.circle(black_frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
 
-                # 骨格線のスタイル（太さ・ドット）を指定して描画
                 mp_drawing.draw_landmarks(
                     frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
                     landmark_drawing_spec=LANDMARK_STYLE,
