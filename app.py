@@ -57,25 +57,32 @@ if uploaded_file is not None:
     out_overlay = cv2.VideoWriter(out_overlay_path, fourcc, orig_fps, (width, height))
     out_skeleton = cv2.VideoWriter(out_skeleton_path, fourcc, orig_fps, (width, height))
 
-    st.info("動画を解析・生成中 (高精度モード)...")
+    st.info("動画を解析・生成中...")
     progress_bar = st.progress(0)
 
     wrist_history = []
     hip_velocities = []
     time_stamps = []
     prev_hip_x = None
+    prev_wrist_pt = None
+    
+    # リリース判定フラグ
+    tracking_active = True
+    max_wrist_speed = 0.0
+    speed_threshold = 20.0
+    has_accelerated = False
+
     frame_count = 0
 
     is_right = (dominant_hand == "右投げ")
     wrist_idx = mp_pose.PoseLandmark.RIGHT_WRIST if is_right else mp_pose.PoseLandmark.LEFT_WRIST
+    # 軸足（右投げ＝右足首、左投げ＝左足首）
     pivot_ankle_idx = mp_pose.PoseLandmark.RIGHT_ANKLE if is_right else mp_pose.PoseLandmark.LEFT_ANKLE
 
-    # --- 高精度モード & スムージングの有効化 ---
-    # model_complexity=1 に設定して動的ダウンロードによる PermissionError を回避
     with mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=1,           # 同梱済みの標準モデルを使用
-        smooth_landmarks=True,         # フレーム間の補正で精度を維持
+        model_complexity=1,
+        smooth_landmarks=True,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     ) as pose:
@@ -94,12 +101,13 @@ if uploaded_file is not None:
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
 
-                # 骨盤中心の計算
+                # 骨盤中心 (Mid-Hip)
                 l_hip = landmarks[mp_pose.PoseLandmark.LEFT_HIP]
                 r_hip = landmarks[mp_pose.PoseLandmark.RIGHT_HIP]
                 hip_x = int(((l_hip.x + r_hip.x) / 2.0) * width)
                 hip_y = int(((l_hip.y + r_hip.y) / 2.0) * height)
 
+                # 並進速度計算
                 if prev_hip_x is not None:
                     dx = abs(hip_x - prev_hip_x)
                     vel = dx * fps
@@ -107,33 +115,57 @@ if uploaded_file is not None:
                     time_stamps.append(current_time)
                 prev_hip_x = hip_x
 
+                # 手首位置と移動速度（リリース検知用）
+                wrist = landmarks[wrist_idx]
+                wrist_pt = (int(wrist.x * width), int(wrist.y * height))
+
+                if prev_wrist_pt is not None:
+                    wrist_speed = np.sqrt((wrist_pt[0] - prev_wrist_pt[0])**2 + (wrist_pt[1] - prev_wrist_pt[1])**2)
+                    if wrist_speed > speed_threshold:
+                        has_accelerated = True
+                        if wrist_speed > max_wrist_speed:
+                            max_wrist_speed = wrist_speed
+
+                    if has_accelerated and (wrist_speed < max_wrist_speed * 0.4):
+                        tracking_active = False
+
+                prev_wrist_pt = wrist_pt
+
+                if tracking_active:
+                    wrist_history.append(wrist_pt)
+
                 # --- モード別描画 ---
                 if analysis_mode == "テイクバック軌道追跡 (手首)":
-                    wrist = landmarks[wrist_idx]
-                    wrist_pt = (int(wrist.x * width), int(wrist.y * height))
-                    wrist_history.append(wrist_pt)
+                    for i in range(1, len(wrist_history)):
+                        cv2.line(frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 4)
+                        cv2.line(black_frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 4)
                     
-                    # 過去30フレーム（約1秒）分の軌跡のみ保持して画面破綻を防ぐ
-                    MAX_TRAIL = 30
-                    trail_pts = wrist_history[-MAX_TRAIL:]
-                    
-                    for i in range(1, len(trail_pts)):
-                        cv2.line(frame, trail_pts[i-1], trail_pts[i], (0, 0, 255), 4)
-                        cv2.line(black_frame, trail_pts[i-1], trail_pts[i], (0, 0, 255), 4)
+                    if len(wrist_history) > 0:
+                        cv2.circle(frame, wrist_history[-1], 6, (0, 0, 255), -1)
+                        cv2.circle(black_frame, wrist_history[-1], 6, (0, 0, 255), -1)
 
                 elif analysis_mode == "簡易地面反力 (GRF) 推定":
+                    # 軸足の座標
                     ankle = landmarks[pivot_ankle_idx]
                     ankle_pt = (int(ankle.x * width), int(ankle.y * height))
-                    grf_x = hip_x - ankle_pt[0]
-                    grf_y = hip_y - ankle_pt[1]
-                    arrow_end = (ankle_pt[0] + grf_x, ankle_pt[1] + grf_y)
-                    cv2.arrowedLine(frame, ankle_pt, arrow_end, (0, 255, 255), 5, tipLength=0.2)
-                    cv2.arrowedLine(black_frame, ankle_pt, arrow_end, (0, 255, 255), 5, tipLength=0.2)
+
+                    # 軸足から骨盤（重心）へ向かうベクトル
+                    vec_x = hip_x - ankle_pt[0]
+                    vec_y = hip_y - ankle_pt[1]
+
+                    # 地面反力の矢印終点（軸足から重心方向に伸びる）
+                    # 視認しやすいようスケール倍率（1.2倍）をかけて足元から伸ばす
+                    arrow_end = (int(ankle_pt[0] + vec_x * 1.2), int(ankle_pt[1] + vec_y * 1.2))
+
+                    # 軸足から上・前方に向かう黄色い矢印を描画
+                    cv2.arrowedLine(frame, ankle_pt, arrow_end, (0, 255, 255), 4, tipLength=0.25)
+                    cv2.arrowedLine(black_frame, ankle_pt, arrow_end, (0, 255, 255), 4, tipLength=0.25)
 
                 elif analysis_mode == "骨盤並進 (重心) 強調":
                     cv2.circle(frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
                     cv2.circle(black_frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
 
+                # 骨格線の描画
                 mp_drawing.draw_landmarks(
                     frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
                     landmark_drawing_spec=LANDMARK_STYLE,
