@@ -76,8 +76,10 @@ if uploaded_file is not None:
 
     is_right = (dominant_hand == "右投げ")
     wrist_idx = mp_pose.PoseLandmark.RIGHT_WRIST if is_right else mp_pose.PoseLandmark.LEFT_WRIST
-    # 軸足（右投げ＝右足首、左投げ＝左足首）
+    
+    # 右投げ: 軸足=右足首, ステップ足=左足首
     pivot_ankle_idx = mp_pose.PoseLandmark.RIGHT_ANKLE if is_right else mp_pose.PoseLandmark.LEFT_ANKLE
+    lead_ankle_idx = mp_pose.PoseLandmark.LEFT_ANKLE if is_right else mp_pose.PoseLandmark.RIGHT_ANKLE
 
     with mp_pose.Pose(
         static_image_mode=False,
@@ -145,21 +147,41 @@ if uploaded_file is not None:
                         cv2.circle(black_frame, wrist_history[-1], 6, (0, 0, 255), -1)
 
                 elif analysis_mode == "簡易地面反力 (GRF) 推定":
-                    # 軸足の座標
-                    ankle = landmarks[pivot_ankle_idx]
-                    ankle_pt = (int(ankle.x * width), int(ankle.y * height))
+                    pivot_ankle = landmarks[pivot_ankle_idx]
+                    lead_ankle = landmarks[lead_ankle_idx]
 
-                    # 軸足から骨盤（重心）へ向かうベクトル
-                    vec_x = hip_x - ankle_pt[0]
-                    vec_y = hip_y - ankle_pt[1]
+                    pivot_pt = (int(pivot_ankle.x * width), int(pivot_ankle.y * height))
+                    lead_pt = (int(lead_ankle.x * width), int(lead_ankle.y * height))
 
-                    # 地面反力の矢印終点（軸足から重心方向に伸びる）
-                    # 視認しやすいようスケール倍率（1.2倍）をかけて足元から伸ばす
-                    arrow_end = (int(ankle_pt[0] + vec_x * 1.2), int(ankle_pt[1] + vec_y * 1.2))
+                    # ステップ足（前足）が着地しているかの判定（Y座標が低く、かつある程度下がってきた時）
+                    # 画像座標系は下に行くほどYが大きい。
+                    # ステップ足が軸足と同等以上の高さ（画面下部）に下りたタイミングを着地とみなす
+                    is_lead_grounded = (lead_ankle.y > pivot_ankle.y - 0.08) and (lead_ankle.y > 0.6)
+                    
+                    # 軸足が浮いているかの判定（足をあげている最中など）
+                    is_pivot_grounded = (pivot_ankle.y > 0.65) and not (is_lead_grounded and pivot_ankle.y < lead_ankle.y - 0.1)
 
-                    # 軸足から上・前方に向かう黄色い矢印を描画
-                    cv2.arrowedLine(frame, ankle_pt, arrow_end, (0, 255, 255), 4, tipLength=0.25)
-                    cv2.arrowedLine(black_frame, ankle_pt, arrow_end, (0, 255, 255), 4, tipLength=0.25)
+                    active_foot_pt = None
+
+                    # フェーズ1: 踏み込み足が着地したら、ブレーキ反力（前足から押し返す反力）を描画
+                    if is_lead_grounded:
+                        active_foot_pt = lead_pt
+                    # フェーズ2: それ以前で軸足が設置していれば、軸足からの押し返しを描画
+                    elif is_pivot_grounded:
+                        active_foot_pt = pivot_pt
+
+                    # 接地足が存在する場合のみ地面反力矢印を描画
+                    if active_foot_pt is not None:
+                        # 接地足から重心（骨盤）へ向かって押し返すベクトル
+                        vec_x = hip_x - active_foot_pt[0]
+                        vec_y = hip_y - active_foot_pt[1]
+
+                        # 矢印の終点（重心方向へ伸ばす）
+                        arrow_end = (int(active_foot_pt[0] + vec_x * 0.8), int(active_foot_pt[1] + vec_y * 0.8))
+
+                        # 地面反力矢印を描画（足元 -> 重心方向）
+                        cv2.arrowedLine(frame, active_foot_pt, arrow_end, (0, 255, 255), 4, tipLength=0.25)
+                        cv2.arrowedLine(black_frame, active_foot_pt, arrow_end, (0, 255, 255), 4, tipLength=0.25)
 
                 elif analysis_mode == "骨盤並進 (重心) 強調":
                     cv2.circle(frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
