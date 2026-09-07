@@ -25,7 +25,7 @@ st.sidebar.header("⚙️ 解析・表示設定")
 
 analysis_mode = st.sidebar.radio(
     "解析モード選択",
-    ["標準 (骨格＆オーバーレイ)", "テイクバック軌道追跡 (手首)", "簡易地面反力 (GRF) 推定", "骨盤並進 (重心) 強調"]
+    ["標準 (骨格＆オーバーレイ)", "テイクバック軌道追跡 (手首)", "物理ベース地面反力 (GRF) 推定", "骨盤並進 (重心) 強調"]
 )
 
 dominant_hand = st.sidebar.radio("投手タイプ", ["右投げ", "左投げ"])
@@ -37,7 +37,20 @@ video_fps_mode = st.sidebar.selectbox(
 fps_map = {"通常撮影 (30 fps)": 30, "スロー撮影 (60 fps)": 60, "ハイスピード (120 fps)": 120, "超スロー (240 fps)": 240}
 fps = fps_map[video_fps_mode]
 
+# 物理パラメータ設定
+user_weight = st.sidebar.number_input("体重 (kg)", min_value=30.0, max_value=120.0, value=65.0, step=1.0)
+GRAVITY = 9.81  # m/s^2
+
 uploaded_file = st.file_uploader("動画ファイルをアップロードしてください (MP4 / MOV)", type=["mp4", "mov", "avi"])
+
+# 3〜5フレームの移動平均フィルタ関数
+def smooth_landmarks_history(history, window_size=5):
+    if len(history) < 2:
+        return history[-1]
+    curr_window = history[-window_size:]
+    avg_x = np.mean([pt[0] for pt in curr_window])
+    avg_y = np.mean([pt[1] for pt in curr_window])
+    return (avg_x, avg_y)
 
 if uploaded_file is not None:
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -60,24 +73,30 @@ if uploaded_file is not None:
     st.info("動画を解析・生成中...")
     progress_bar = st.progress(0)
 
-    wrist_history = []
-    hip_velocities = []
-    time_stamps = []
-    prev_hip_x = None
-    prev_wrist_pt = None
+    # 履歴バッファ
+    hip_raw_history = []
+    wrist_raw_history = []
+    pivot_ankle_raw_history = []
+    lead_ankle_raw_history = []
     
-    # リリース判定フラグ
+    # 物理量計算用履歴
+    com_y_m_history = []     # 重心Y座標 (m)
+    com_vy_m_history = []    # 重心Y速度 (m/s)
+    com_vx_m_history = []    # 重心X速度 (m/s)
+    time_stamps = []
+    
+    wrist_display_history = []
+    
+    # リリース判定
     tracking_active = True
     max_wrist_speed = 0.0
-    speed_threshold = 20.0
     has_accelerated = False
 
     frame_count = 0
+    dt = 1.0 / fps  # 1フレームあたりの秒数
 
     is_right = (dominant_hand == "右投げ")
     wrist_idx = mp_pose.PoseLandmark.RIGHT_WRIST if is_right else mp_pose.PoseLandmark.LEFT_WRIST
-    
-    # 右投げ: 軸足=右足首, ステップ足=左足首
     pivot_ankle_idx = mp_pose.PoseLandmark.RIGHT_ANKLE if is_right else mp_pose.PoseLandmark.LEFT_ANKLE
     lead_ankle_idx = mp_pose.PoseLandmark.LEFT_ANKLE if is_right else mp_pose.PoseLandmark.RIGHT_ANKLE
 
@@ -94,7 +113,7 @@ if uploaded_file is not None:
                 break
 
             frame_count += 1
-            current_time = frame_count / fps
+            current_time = frame_count * dt
             black_frame = np.zeros((height, width, 3), dtype=np.uint8)
 
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -103,89 +122,111 @@ if uploaded_file is not None:
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
 
-                # 骨盤中心 (Mid-Hip)
+                # --- 1. ピクセル座標の取得 ---
                 l_hip = landmarks[mp_pose.PoseLandmark.LEFT_HIP]
                 r_hip = landmarks[mp_pose.PoseLandmark.RIGHT_HIP]
-                hip_x = int(((l_hip.x + r_hip.x) / 2.0) * width)
-                hip_y = int(((l_hip.y + r_hip.y) / 2.0) * height)
+                
+                # 生座標 (px)
+                raw_hip = (((l_hip.x + r_hip.x) / 2.0) * width, ((l_hip.y + r_hip.y) / 2.0) * height)
+                raw_wrist = (landmarks[wrist_idx].x * width, landmarks[wrist_idx].y * height)
+                raw_pivot = (landmarks[pivot_ankle_idx].x * width, landmarks[pivot_ankle_idx].y * height)
+                raw_lead = (landmarks[lead_ankle_idx].x * width, landmarks[lead_ankle_idx].y * height)
 
-                # 並進速度計算
-                if prev_hip_x is not None:
-                    dx = abs(hip_x - prev_hip_x)
-                    vel = dx * fps
-                    hip_velocities.append(vel)
-                    time_stamps.append(current_time)
-                prev_hip_x = hip_x
+                hip_raw_history.append(raw_hip)
+                wrist_raw_history.append(raw_wrist)
+                pivot_ankle_raw_history.append(raw_pivot)
+                lead_ankle_raw_history.append(raw_lead)
 
-                # 手首位置と移動速度（リリース検知用）
-                wrist = landmarks[wrist_idx]
-                wrist_pt = (int(wrist.x * width), int(wrist.y * height))
+                # --- 2. 移動平均フィルタによる平滑化 (過去5フレーム) ---
+                hip_pt = smooth_landmarks_history(hip_raw_history, window_size=5)
+                wrist_pt = smooth_landmarks_history(wrist_raw_history, window_size=5)
+                pivot_pt = smooth_landmarks_history(pivot_ankle_raw_history, window_size=5)
+                lead_pt = smooth_landmarks_history(lead_ankle_raw_history, window_size=5)
 
-                if prev_wrist_pt is not None:
-                    wrist_speed = np.sqrt((wrist_pt[0] - prev_wrist_pt[0])**2 + (wrist_pt[1] - prev_wrist_pt[1])**2)
-                    if wrist_speed > speed_threshold:
+                # --- 3. px → m 変換スケールの計算 ---
+                # 左右の股関節距離(px)を 成人平均 約0.18m とする
+                hip_dx_px = (r_hip.x - l_hip.x) * width
+                hip_dy_px = (r_hip.y - l_hip.y) * height
+                hip_dist_px = np.sqrt(hip_dx_px**2 + hip_dy_px**2)
+                
+                # 検出エラー防止（最小px保護）
+                scale_px_to_m = 0.18 / max(hip_dist_px, 15.0)
+
+                # --- 4. 速度 (m/s) & 加速度 (m/s^2) & GRF計算 ---
+                hip_x_m = hip_pt[0] * scale_px_to_m
+                hip_y_m = hip_pt[1] * scale_px_to_m  # 画像座標系: 下方向がプラス
+
+                grf_y_N = 0.0
+                vx_m = 0.0
+
+                if len(com_y_m_history) >= 1:
+                    # 1次微分: 速度 (m/s)
+                    vx_m = abs(hip_x_m - (com_vx_m_history[-1] if com_vx_m_history else hip_x_m)) / dt  # 簡易X速度
+                    vy_m = (hip_y_m - com_y_m_history[-1]) / dt  # Y速度（下方向プラス）
+                    
+                    com_vx_m_history.append(vx_m)
+                    
+                    if len(com_vy_m_history) >= 1:
+                        # 2次微分: 上下加速度 a_y (m/s^2)
+                        # 画像座標系で下が正のため、鉛直上向き加速度は -d(vy)/dt
+                        a_y = - (vy_m - com_vy_m_history[-1]) / dt
+
+                        # 地面反力 F = m * (a_y + g)
+                        # 重力加速度 9.81 を加算
+                        grf_y_N = user_weight * max(0.0, (a_y + GRAVITY))
+                        
+                    com_vy_m_history.append(vy_m)
+                else:
+                    com_vx_m_history.append(0.0)
+                    com_vy_m_history.append(0.0)
+
+                com_y_m_history.append(hip_y_m)
+                time_stamps.append(current_time)
+
+                # リリリース判定 (手首速度に基づく)
+                if len(wrist_raw_history) >= 2:
+                    w_speed = np.sqrt((wrist_pt[0] - wrist_raw_history[-2][0])**2 + (wrist_pt[1] - wrist_raw_history[-2][1])**2) * scale_px_to_m / dt
+                    if w_speed > 2.0:  # 2 m/s 以上で振りかぶり判定
                         has_accelerated = True
-                        if wrist_speed > max_wrist_speed:
-                            max_wrist_speed = wrist_speed
-
-                    if has_accelerated and (wrist_speed < max_wrist_speed * 0.4):
+                        max_wrist_speed = max(max_wrist_speed, w_speed)
+                    if has_accelerated and (w_speed < max_wrist_speed * 0.35):
                         tracking_active = False
 
-                prev_wrist_pt = wrist_pt
-
                 if tracking_active:
-                    wrist_history.append(wrist_pt)
+                    wrist_display_history.append((int(wrist_pt[0]), int(wrist_pt[1])))
 
-                # --- モード別描画 ---
+                # --- 描画処理 ---
+                int_hip = (int(hip_pt[0]), int(hip_pt[1]))
+                int_pivot = (int(pivot_pt[0]), int(pivot_pt[1]))
+                int_lead = (int(lead_pt[0]), int(lead_pt[1]))
+
                 if analysis_mode == "テイクバック軌道追跡 (手首)":
-                    for i in range(1, len(wrist_history)):
-                        cv2.line(frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 4)
-                        cv2.line(black_frame, wrist_history[i-1], wrist_history[i], (0, 0, 255), 4)
-                    
-                    if len(wrist_history) > 0:
-                        cv2.circle(frame, wrist_history[-1], 6, (0, 0, 255), -1)
-                        cv2.circle(black_frame, wrist_history[-1], 6, (0, 0, 255), -1)
+                    for i in range(1, len(wrist_display_history)):
+                        cv2.line(frame, wrist_display_history[i-1], wrist_display_history[i], (0, 0, 255), 4)
+                        cv2.line(black_frame, wrist_display_history[i-1], wrist_display_history[i], (0, 0, 255), 4)
 
-                elif analysis_mode == "簡易地面反力 (GRF) 推定":
-                    pivot_ankle = landmarks[pivot_ankle_idx]
-                    lead_ankle = landmarks[lead_ankle_idx]
+                elif analysis_mode == "物理ベース地面反力 (GRF) 推定":
+                    if tracking_active:
+                        # 着地足の判定（高さ比較）
+                        active_foot = int_lead if lead_pt[1] >= (pivot_pt[1] - 10) else int_pivot
 
-                    pivot_pt = (int(pivot_ankle.x * width), int(pivot_ankle.y * height))
-                    lead_pt = (int(lead_ankle.x * width), int(lead_ankle.y * height))
+                        # GRFの大きさに応じた矢印長さを算出 (例: 1000N ≒ 100px)
+                        arrow_len_px = int((grf_y_N / (user_weight * GRAVITY)) * 60)
+                        arrow_len_px = min(max(arrow_len_px, 10), 180)  # 描画サイズ制限
 
-                    # ステップ足（前足）が着地しているかの判定（Y座標が低く、かつある程度下がってきた時）
-                    # 画像座標系は下に行くほどYが大きい。
-                    # ステップ足が軸足と同等以上の高さ（画面下部）に下りたタイミングを着地とみなす
-                    is_lead_grounded = (lead_ankle.y > pivot_ankle.y - 0.08) and (lead_ankle.y > 0.6)
-                    
-                    # 軸足が浮いているかの判定（足をあげている最中など）
-                    is_pivot_grounded = (pivot_ankle.y > 0.65) and not (is_lead_grounded and pivot_ankle.y < lead_ankle.y - 0.1)
+                        # 接地足から上（鉛直上向き）へ向かう反力矢印
+                        arrow_end = (active_foot[0], active_foot[1] - arrow_len_px)
 
-                    active_foot_pt = None
-
-                    # フェーズ1: 踏み込み足が着地したら、ブレーキ反力（前足から押し返す反力）を描画
-                    if is_lead_grounded:
-                        active_foot_pt = lead_pt
-                    # フェーズ2: それ以前で軸足が設置していれば、軸足からの押し返しを描画
-                    elif is_pivot_grounded:
-                        active_foot_pt = pivot_pt
-
-                    # 接地足が存在する場合のみ地面反力矢印を描画
-                    if active_foot_pt is not None:
-                        # 接地足から重心（骨盤）へ向かって押し返すベクトル
-                        vec_x = hip_x - active_foot_pt[0]
-                        vec_y = hip_y - active_foot_pt[1]
-
-                        # 矢印の終点（重心方向へ伸ばす）
-                        arrow_end = (int(active_foot_pt[0] + vec_x * 0.8), int(active_foot_pt[1] + vec_y * 0.8))
-
-                        # 地面反力矢印を描画（足元 -> 重心方向）
-                        cv2.arrowedLine(frame, active_foot_pt, arrow_end, (0, 255, 255), 4, tipLength=0.25)
-                        cv2.arrowedLine(black_frame, active_foot_pt, arrow_end, (0, 255, 255), 4, tipLength=0.25)
+                        cv2.arrowedLine(frame, active_foot, arrow_end, (0, 255, 255), 4, tipLength=0.3)
+                        cv2.arrowedLine(black_frame, active_foot, arrow_end, (0, 255, 255), 4, tipLength=0.3)
+                        
+                        # 画面上にリアルタイムの力 (N) を表示
+                        cv2.putText(frame, f"GRF: {int(grf_y_N)} N", (active_foot[0] + 15, active_foot[1] - 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
                 elif analysis_mode == "骨盤並進 (重心) 強調":
-                    cv2.circle(frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
-                    cv2.circle(black_frame, (hip_x, hip_y), 12, (255, 0, 0), -1)
+                    cv2.circle(frame, int_hip, 12, (255, 0, 0), -1)
+                    cv2.circle(black_frame, int_hip, 12, (255, 0, 0), -1)
 
                 # 骨格線の描画
                 mp_drawing.draw_landmarks(
@@ -215,28 +256,25 @@ if uploaded_file is not None:
     with col1:
         st.subheader("📹 実動画 + 解析描画")
         st.video(out_overlay_path)
-        with open(out_overlay_path, "rb") as f:
-            st.download_button("📹 解析動画をダウンロード", f, file_name="analyzed_overlay.mp4", mime="video/mp4")
 
     with col2:
         st.subheader("🦴 骨格データ (ブラックスクリーン)")
         st.video(out_skeleton_path)
-        with open(out_skeleton_path, "rb") as f:
-            st.download_button("🦴 骨格動画をダウンロード", f, file_name="analyzed_skeleton.mp4", mime="video/mp4")
 
-    if len(hip_velocities) > 1:
+    # 単位を m/s にした正確な並進速度グラフ
+    if len(com_vx_m_history) > 1:
         st.subheader("📈 骨盤並進 (重心) 速度グラフ")
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=time_stamps, 
-            y=hip_velocities, 
+            y=com_vx_m_history, 
             mode='lines', 
-            name='並進速度 (px/s)', 
+            name='並進速度 (m/s)', 
             line=dict(color='cyan', width=2)
         ))
         fig.update_layout(
             xaxis_title="時間 (秒)",
-            yaxis_title="速度 (px/s)",
+            yaxis_title="速度 (m/s)",
             margin=dict(l=20, r=20, t=20, b=20),
             height=300,
             template="plotly_dark"
