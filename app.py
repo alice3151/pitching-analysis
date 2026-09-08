@@ -1,5 +1,6 @@
 import os
 import tempfile
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -8,12 +9,16 @@ import streamlit as st
 
 import mediapipe as mp
 
+
+# =========================================================
+# MediaPipe
+# =========================================================
+
 mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
 
 
 # =========================================================
-# 設定
+# Streamlit設定
 # =========================================================
 
 st.set_page_config(
@@ -25,6 +30,11 @@ st.set_page_config(
 st.title("⚾ ピッチング動作・運動力学解析")
 
 st.sidebar.header("⚙️ 解析設定")
+
+
+# =========================================================
+# ユーザー設定
+# =========================================================
 
 dominant_hand = st.sidebar.radio(
     "投手タイプ",
@@ -43,10 +53,10 @@ video_fps_mode = st.sidebar.selectbox(
 )
 
 fps_map = {
-    "通常撮影 (30 fps)": 30,
-    "スロー撮影 (60 fps)": 60,
-    "ハイスピード (120 fps)": 120,
-    "超スロー (240 fps)": 240
+    "通常撮影 (30 fps)": 30.0,
+    "スロー撮影 (60 fps)": 60.0,
+    "ハイスピード (120 fps)": 120.0,
+    "超スロー (240 fps)": 240.0
 }
 
 user_weight = st.sidebar.number_input(
@@ -57,16 +67,25 @@ user_weight = st.sidebar.number_input(
     step=1.0
 )
 
-# 股関節幅を基準にする場合
 reference_width_m = st.sidebar.number_input(
-    "基準となる股関節幅 (m)",
+    "基準股関節幅 (m)",
     min_value=0.12,
     max_value=0.30,
     value=0.18,
-    step=0.01
+    step=0.01,
+    help="2D動画のピクセル→m変換に使用します。"
+)
+
+smooth_window = st.sidebar.slider(
+    "平滑化フレーム数",
+    min_value=3,
+    max_value=11,
+    value=5,
+    step=2
 )
 
 GRAVITY = 9.81
+
 
 uploaded_file = st.file_uploader(
     "動画ファイルをアップロードしてください",
@@ -80,169 +99,356 @@ uploaded_file = st.file_uploader(
 
 def moving_average(data, window=5):
     """
-    左寄り移動平均ではなく、中央寄りの単純移動平均。
+    単純移動平均。
+    NaNにも比較的安全に対応。
     """
-    if len(data) == 0:
-        return data
 
     data = np.asarray(data, dtype=float)
 
-    kernel = np.ones(window) / window
-    result = np.convolve(data, kernel, mode="same")
+    if len(data) == 0:
+        return data
 
-    # 端点を補正
+    window = max(1, int(window))
+
+    if window == 1:
+        return data.copy()
+
+    result = np.full_like(data, np.nan, dtype=float)
+
     half = window // 2
 
-    for i in range(half):
-        result[i] = np.mean(data[:i + half + 1])
+    for i in range(len(data)):
 
-    for i in range(len(data) - half, len(data)):
-        result[i] = np.mean(data[i - half:])
+        start = max(0, i - half)
+        end = min(len(data), i + half + 1)
+
+        vals = data[start:end]
+
+        valid = vals[np.isfinite(vals)]
+
+        if len(valid) > 0:
+            result[i] = np.mean(valid)
+
+    # 残ったNaNを前後値で補間
+    series = pd.Series(result)
+
+    result = (
+        series
+        .interpolate(limit_direction="both")
+        .to_numpy()
+    )
 
     return result
 
 
 def smooth_points(points, window=5):
     """
-    2D座標の平滑化
+    2D座標平滑化
     """
-    points = np.asarray(points, dtype=float)
 
-    if len(points) == 0:
-        return points
+    arr = np.asarray(points, dtype=float)
 
-    x = moving_average(points[:, 0], window)
-    y = moving_average(points[:, 1], window)
+    if len(arr) == 0:
+        return arr
 
-    return np.column_stack([x, y])
+    x = moving_average(
+        arr[:, 0],
+        window
+    )
+
+    y = moving_average(
+        arr[:, 1],
+        window
+    )
+
+    return np.column_stack(
+        [x, y]
+    )
+
+
+def distance_2d(p1, p2):
+    return float(
+        np.linalg.norm(
+            np.asarray(p1) -
+            np.asarray(p2)
+        )
+    )
 
 
 def angle_2d(p1, p2):
     """
-    p1 -> p2 の角度 [deg]
+    p1→p2 の画像上角度 [deg]
     """
+
     dx = p2[0] - p1[0]
     dy = p2[1] - p1[1]
 
-    return np.degrees(np.arctan2(dy, dx))
+    return float(
+        np.degrees(
+            np.arctan2(dy, dx)
+        )
+    )
 
 
 def unwrap_angle_deg(angle):
     """
-    -180~180の角度をunwrap
+    ±180°の境界をまたぐ角度をunwrap
     """
-    rad = np.radians(angle)
-    return np.degrees(np.unwrap(rad))
 
+    angle = np.asarray(
+        angle,
+        dtype=float
+    )
 
-def calculate_angular_velocity(angle_deg, dt):
-    """
-    deg/s
-    """
-    return np.gradient(angle_deg, dt)
-
-
-def distance_2d(p1, p2):
-    return np.linalg.norm(np.asarray(p1) - np.asarray(p2))
+    return np.degrees(
+        np.unwrap(
+            np.radians(angle)
+        )
+    )
 
 
 def velocity_1d(position, dt):
-    return np.gradient(position, dt)
-
-
-def find_foot_plant(lead_y, fps):
     """
-    前足接地を簡易推定。
-    画面座標では下方向が+なので、
-    前足が最も下側に来る付近を候補とする。
-
-    ※完全自動のFC検出ではない
+    1次元速度
     """
-    n = len(lead_y)
 
-    if n < 10:
-        return max(0, n // 2)
-
-    start = int(n * 0.20)
-    end = int(n * 0.85)
-
-    # 最も下に来た位置
-    idx = start + np.argmax(lead_y[start:end])
-
-    return int(idx)
+    return np.gradient(
+        position,
+        dt
+    )
 
 
 def calculate_scale(scales):
     """
-    m / px
+    m / pixel
     """
-    scales = np.asarray(scales)
 
-    scales = scales[np.isfinite(scales)]
-    scales = scales[scales > 0]
+    arr = np.asarray(
+        scales,
+        dtype=float
+    )
 
-    if len(scales) == 0:
+    arr = arr[
+        np.isfinite(arr)
+    ]
+
+    arr = arr[
+        arr > 0
+    ]
+
+    if len(arr) == 0:
         return 0.001
 
-    return float(np.median(scales))
+    return float(
+        np.median(arr)
+    )
+
+
+def safe_int_point(point):
+    """
+    OpenCV用整数座標
+    """
+
+    return (
+        int(round(point[0])),
+        int(round(point[1]))
+    )
+
+
+def find_foot_plant(
+    lead_y,
+    wrist_speed=None
+):
+    """
+    簡易Foot Plant推定。
+
+    前足Y座標が大きく動き、
+    最も下側に近づく領域を候補とする。
+    """
+
+    n = len(lead_y)
+
+    if n < 10:
+        return max(
+            0,
+            n // 2
+        )
+
+    # 極端な先頭・末尾を除外
+    start = int(n * 0.15)
+    end = int(n * 0.85)
+
+    if end <= start:
+        return n // 2
+
+    candidate = lead_y[
+        start:end
+    ]
+
+    idx = start + int(
+        np.nanargmax(candidate)
+    )
+
+    return int(idx)
+
+
+def calculate_elbow_angle(
+    shoulder,
+    elbow,
+    wrist
+):
+    """
+    肘角度
+    """
+
+    v1 = np.asarray(
+        shoulder
+    ) - np.asarray(elbow)
+
+    v2 = np.asarray(
+        wrist
+    ) - np.asarray(elbow)
+
+    n1 = np.linalg.norm(v1)
+    n2 = np.linalg.norm(v2)
+
+    if n1 < 1e-8 or n2 < 1e-8:
+        return np.nan
+
+    cos_theta = np.dot(
+        v1,
+        v2
+    ) / (
+        n1 * n2
+    )
+
+    cos_theta = np.clip(
+        cos_theta,
+        -1.0,
+        1.0
+    )
+
+    return float(
+        np.degrees(
+            np.arccos(
+                cos_theta
+            )
+        )
+    )
 
 
 # =========================================================
-# Main
+# アプリ本体
 # =========================================================
 
 if uploaded_file is not None:
 
-    # -----------------------------------------------------
-    # 一時ファイル
-    # -----------------------------------------------------
+    # =====================================================
+    # 動画保存
+    # =====================================================
 
-    suffix = os.path.splitext(uploaded_file.name)[1]
+    suffix = os.path.splitext(
+        uploaded_file.name
+    )[1]
 
-    tfile = tempfile.NamedTemporaryFile(
+    input_file = tempfile.NamedTemporaryFile(
         delete=False,
         suffix=suffix
     )
 
-    tfile.write(uploaded_file.read())
-    tfile.close()
+    input_file.write(
+        uploaded_file.read()
+    )
 
-    cap = cv2.VideoCapture(tfile.name)
+    input_file.close()
 
-    orig_fps = cap.get(cv2.CAP_PROP_FPS)
+    cap = cv2.VideoCapture(
+        input_file.name
+    )
 
-    if orig_fps is None or orig_fps <= 0:
+    if not cap.isOpened():
+
+        st.error(
+            "動画を開けませんでした。"
+        )
+
+        st.stop()
+
+    orig_fps = cap.get(
+        cv2.CAP_PROP_FPS
+    )
+
+    if (
+        orig_fps is None
+        or not np.isfinite(orig_fps)
+        or orig_fps <= 0
+    ):
         orig_fps = 30.0
 
     if video_fps_mode == "動画のFPSを使用":
+
         fps = orig_fps
+
     else:
-        fps = fps_map[video_fps_mode]
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = fps_map[
+            video_fps_mode
+        ]
 
-    st.write(
-        f"動画サイズ: {width} × {height} px / "
-        f"FPS: {orig_fps:.2f}"
+    width = int(
+        cap.get(
+            cv2.CAP_PROP_FRAME_WIDTH
+        )
     )
 
-    # -----------------------------------------------------
+    height = int(
+        cap.get(
+            cv2.CAP_PROP_FRAME_HEIGHT
+        )
+    )
+
+    total_frames = int(
+        cap.get(
+            cv2.CAP_PROP_FRAME_COUNT
+        )
+    )
+
+    st.info(
+        f"動画: {width} × {height} px / "
+        f"元FPS: {orig_fps:.2f} / "
+        f"解析FPS: {fps:.2f}"
+    )
+
+
+    # =====================================================
     # 出力動画
-    # -----------------------------------------------------
+    # =====================================================
 
-    out_overlay_path = tempfile.NamedTemporaryFile(
+    overlay_file = tempfile.NamedTemporaryFile(
         delete=False,
         suffix=".mp4"
-    ).name
+    )
 
-    out_skeleton_path = tempfile.NamedTemporaryFile(
+    overlay_file.close()
+
+    skeleton_file = tempfile.NamedTemporaryFile(
         delete=False,
         suffix=".mp4"
-    ).name
+    )
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    skeleton_file.close()
+
+    out_overlay_path = (
+        overlay_file.name
+    )
+
+    out_skeleton_path = (
+        skeleton_file.name
+    )
+
+    fourcc = cv2.VideoWriter_fourcc(
+        *"mp4v"
+    )
 
     out_overlay = cv2.VideoWriter(
         out_overlay_path,
@@ -258,58 +464,60 @@ if uploaded_file is not None:
         (width, height)
     )
 
-    progress_bar = st.progress(0)
 
     # =====================================================
-    # Landmark index
+    # MediaPipe Landmark
     # =====================================================
 
-    is_right = dominant_hand == "右投げ"
+    is_right = (
+        dominant_hand == "右投げ"
+    )
 
-    throwing_shoulder = (
+    throwing_shoulder_idx = (
         mp_pose.PoseLandmark.RIGHT_SHOULDER
         if is_right
         else mp_pose.PoseLandmark.LEFT_SHOULDER
     )
 
-    throwing_elbow = (
+    throwing_elbow_idx = (
         mp_pose.PoseLandmark.RIGHT_ELBOW
         if is_right
         else mp_pose.PoseLandmark.LEFT_ELBOW
     )
 
-    throwing_wrist = (
+    throwing_wrist_idx = (
         mp_pose.PoseLandmark.RIGHT_WRIST
         if is_right
         else mp_pose.PoseLandmark.LEFT_WRIST
     )
 
-    pivot_ankle = (
+    pivot_ankle_idx = (
         mp_pose.PoseLandmark.RIGHT_ANKLE
         if is_right
         else mp_pose.PoseLandmark.LEFT_ANKLE
     )
 
-    lead_ankle = (
+    lead_ankle_idx = (
         mp_pose.PoseLandmark.LEFT_ANKLE
         if is_right
         else mp_pose.PoseLandmark.RIGHT_ANKLE
     )
 
+
     # =====================================================
-    # Data Buffer
+    # データ格納
     # =====================================================
 
     frames = []
-
-    pelvis_centers = []
-    thorax_centers = []
 
     left_hips = []
     right_hips = []
 
     left_shoulders = []
     right_shoulders = []
+
+    pelvis_centers = []
+    thorax_centers = []
 
     throwing_shoulders = []
     throwing_elbows = []
@@ -320,12 +528,22 @@ if uploaded_file is not None:
 
     scales = []
 
+
     # =====================================================
     # PASS 1
-    # Pose Detection
+    # 骨格検出
     # =====================================================
 
-    st.info("① 骨格解析中...")
+    st.subheader(
+        "① 骨格解析"
+    )
+
+    progress = st.progress(0)
+
+    frame_idx = 0
+
+    last_values = None
+
 
     with mp_pose.Pose(
         static_image_mode=False,
@@ -335,10 +553,6 @@ if uploaded_file is not None:
         min_tracking_confidence=0.5
     ) as pose:
 
-        frame_idx = 0
-
-        last_values = None
-
         while cap.isOpened():
 
             ret, frame = cap.read()
@@ -346,89 +560,143 @@ if uploaded_file is not None:
             if not ret:
                 break
 
-            frames.append(frame.copy())
+            frames.append(
+                frame.copy()
+            )
 
-            image_rgb = cv2.cvtColor(
+            rgb = cv2.cvtColor(
                 frame,
                 cv2.COLOR_BGR2RGB
             )
 
-            results = pose.process(image_rgb)
+            results = pose.process(
+                rgb
+            )
 
             if results.pose_landmarks:
 
                 lm = results.pose_landmarks.landmark
+
 
                 # -----------------------------------------
                 # Hip
                 # -----------------------------------------
 
                 lh = (
-                    lm[mp_pose.PoseLandmark.LEFT_HIP].x * width,
-                    lm[mp_pose.PoseLandmark.LEFT_HIP].y * height
+                    lm[
+                        mp_pose.PoseLandmark.LEFT_HIP
+                    ].x * width,
+
+                    lm[
+                        mp_pose.PoseLandmark.LEFT_HIP
+                    ].y * height
                 )
 
                 rh = (
-                    lm[mp_pose.PoseLandmark.RIGHT_HIP].x * width,
-                    lm[mp_pose.PoseLandmark.RIGHT_HIP].y * height
+                    lm[
+                        mp_pose.PoseLandmark.RIGHT_HIP
+                    ].x * width,
+
+                    lm[
+                        mp_pose.PoseLandmark.RIGHT_HIP
+                    ].y * height
                 )
 
                 pelvis = (
-                    (lh[0] + rh[0]) / 2,
-                    (lh[1] + rh[1]) / 2
+                    (lh[0] + rh[0]) / 2.0,
+                    (lh[1] + rh[1]) / 2.0
                 )
+
 
                 # -----------------------------------------
                 # Shoulder
                 # -----------------------------------------
 
                 ls = (
-                    lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x * width,
-                    lm[mp_pose.PoseLandmark.LEFT_SHOULDER].y * height
+                    lm[
+                        mp_pose.PoseLandmark.LEFT_SHOULDER
+                    ].x * width,
+
+                    lm[
+                        mp_pose.PoseLandmark.LEFT_SHOULDER
+                    ].y * height
                 )
 
                 rs = (
-                    lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].x * width,
-                    lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].y * height
+                    lm[
+                        mp_pose.PoseLandmark.RIGHT_SHOULDER
+                    ].x * width,
+
+                    lm[
+                        mp_pose.PoseLandmark.RIGHT_SHOULDER
+                    ].y * height
                 )
 
                 thorax = (
-                    (ls[0] + rs[0]) / 2,
-                    (ls[1] + rs[1]) / 2
+                    (ls[0] + rs[0]) / 2.0,
+                    (ls[1] + rs[1]) / 2.0
                 )
 
+
                 # -----------------------------------------
-                # Throwing arm
+                # Throwing Arm
                 # -----------------------------------------
 
                 ts = (
-                    lm[throwing_shoulder].x * width,
-                    lm[throwing_shoulder].y * height
+                    lm[
+                        throwing_shoulder_idx
+                    ].x * width,
+
+                    lm[
+                        throwing_shoulder_idx
+                    ].y * height
                 )
 
                 te = (
-                    lm[throwing_elbow].x * width,
-                    lm[throwing_elbow].y * height
+                    lm[
+                        throwing_elbow_idx
+                    ].x * width,
+
+                    lm[
+                        throwing_elbow_idx
+                    ].y * height
                 )
 
                 tw = (
-                    lm[throwing_wrist].x * width,
-                    lm[throwing_wrist].y * height
+                    lm[
+                        throwing_wrist_idx
+                    ].x * width,
+
+                    lm[
+                        throwing_wrist_idx
+                    ].y * height
                 )
+
 
                 # -----------------------------------------
                 # Feet
                 # -----------------------------------------
 
                 pa = (
-                    lm[pivot_ankle].x * width,
-                    lm[pivot_ankle].y * height
+                    lm[
+                        pivot_ankle_idx
+                    ].x * width,
+
+                    lm[
+                        pivot_ankle_idx
+                    ].y * height
                 )
 
                 la = (
-                    lm[lead_ankle].x * width,
-                    lm[lead_ankle].y * height
+                    lm[
+                        lead_ankle_idx
+                    ].x * width,
+
+                    lm[
+                        lead_ankle_idx
+                    ].y * height
                 )
+
 
                 # -----------------------------------------
                 # Save
@@ -436,183 +704,297 @@ if uploaded_file is not None:
 
                 left_hips.append(lh)
                 right_hips.append(rh)
-                pelvis_centers.append(pelvis)
 
                 left_shoulders.append(ls)
                 right_shoulders.append(rs)
-                thorax_centers.append(thorax)
 
-                throwing_shoulders.append(ts)
-                throwing_elbows.append(te)
-                throwing_wrists.append(tw)
+                pelvis_centers.append(
+                    pelvis
+                )
 
-                pivot_ankles.append(pa)
-                lead_ankles.append(la)
+                thorax_centers.append(
+                    thorax
+                )
+
+                throwing_shoulders.append(
+                    ts
+                )
+
+                throwing_elbows.append(
+                    te
+                )
+
+                throwing_wrists.append(
+                    tw
+                )
+
+                pivot_ankles.append(
+                    pa
+                )
+
+                lead_ankles.append(
+                    la
+                )
+
 
                 # -----------------------------------------
                 # Scale
-                # hip width → meters
                 # -----------------------------------------
 
-                hip_width_px = distance_2d(lh, rh)
+                hip_width_px = distance_2d(
+                    lh,
+                    rh
+                )
 
                 if hip_width_px > 5:
 
                     scales.append(
-                        reference_width_m / hip_width_px
+                        reference_width_m /
+                        hip_width_px
                     )
 
+
                 last_values = (
-                    lh, rh, pelvis,
-                    ls, rs, thorax,
-                    ts, te, tw,
-                    pa, la
+                    lh,
+                    rh,
+                    pelvis,
+                    ls,
+                    rs,
+                    thorax,
+                    ts,
+                    te,
+                    tw,
+                    pa,
+                    la
                 )
 
             else:
 
                 # -----------------------------------------
                 # Detection failure
-                # 前フレーム保持
                 # -----------------------------------------
 
                 if last_values is not None:
 
                     (
-                        lh, rh, pelvis,
-                        ls, rs, thorax,
-                        ts, te, tw,
-                        pa, la
+                        lh,
+                        rh,
+                        pelvis,
+                        ls,
+                        rs,
+                        thorax,
+                        ts,
+                        te,
+                        tw,
+                        pa,
+                        la
                     ) = last_values
 
                 else:
 
-                    center = (width / 2, height / 2)
+                    center = (
+                        width / 2.0,
+                        height / 2.0
+                    )
 
-                    lh = rh = pelvis = center
-                    ls = rs = thorax = center
-                    ts = te = tw = center
-                    pa = la = center
+                    lh = center
+                    rh = center
+                    pelvis = center
+
+                    ls = center
+                    rs = center
+                    thorax = center
+
+                    ts = center
+                    te = center
+                    tw = center
+
+                    pa = center
+                    la = center
 
                 left_hips.append(lh)
                 right_hips.append(rh)
-                pelvis_centers.append(pelvis)
 
                 left_shoulders.append(ls)
                 right_shoulders.append(rs)
-                thorax_centers.append(thorax)
 
-                throwing_shoulders.append(ts)
-                throwing_elbows.append(te)
-                throwing_wrists.append(tw)
+                pelvis_centers.append(
+                    pelvis
+                )
 
-                pivot_ankles.append(pa)
-                lead_ankles.append(la)
+                thorax_centers.append(
+                    thorax
+                )
+
+                throwing_shoulders.append(
+                    ts
+                )
+
+                throwing_elbows.append(
+                    te
+                )
+
+                throwing_wrists.append(
+                    tw
+                )
+
+                pivot_ankles.append(
+                    pa
+                )
+
+                lead_ankles.append(
+                    la
+                )
+
 
             frame_idx += 1
 
-            progress_bar.progress(
-                min(frame_idx / max(total_frames, 1), 1.0)
-            )
+            if total_frames > 0:
+
+                progress.progress(
+                    min(
+                        frame_idx / total_frames,
+                        1.0
+                    )
+                )
+
 
     cap.release()
 
-    num_frames = len(frames)
+
+    # =====================================================
+    # Validation
+    # =====================================================
+
+    num_frames = len(
+        frames
+    )
 
     if num_frames < 10:
-        st.error("動画が短すぎます。")
+
+        st.error(
+            "十分なフレーム数を取得できませんでした。"
+        )
+
         st.stop()
+
 
     # =====================================================
     # PASS 2
-    # Smooth
+    # 平滑化
     # =====================================================
+
+    st.subheader(
+        "② 座標平滑化"
+    )
 
     pelvis_centers = smooth_points(
         pelvis_centers,
-        window=7
+        smooth_window
     )
 
     thorax_centers = smooth_points(
         thorax_centers,
-        window=7
+        smooth_window
     )
 
     left_hips = smooth_points(
         left_hips,
-        window=7
+        smooth_window
     )
 
     right_hips = smooth_points(
         right_hips,
-        window=7
+        smooth_window
     )
 
     left_shoulders = smooth_points(
         left_shoulders,
-        window=7
+        smooth_window
     )
 
     right_shoulders = smooth_points(
         right_shoulders,
-        window=7
+        smooth_window
     )
 
     throwing_shoulders = smooth_points(
         throwing_shoulders,
-        window=7
+        smooth_window
     )
 
     throwing_elbows = smooth_points(
         throwing_elbows,
-        window=7
+        smooth_window
     )
 
     throwing_wrists = smooth_points(
         throwing_wrists,
-        window=7
+        smooth_window
     )
 
     pivot_ankles = smooth_points(
         pivot_ankles,
-        window=7
+        smooth_window
     )
 
     lead_ankles = smooth_points(
         lead_ankles,
-        window=7
+        smooth_window
     )
 
-    scale = calculate_scale(scales)
+    scale = calculate_scale(
+        scales
+    )
 
     dt = 1.0 / fps
 
+
     # =====================================================
     # PASS 3
-    # 投球方向軸を決める
+    # 並進・回旋
     # =====================================================
 
-    # 初期の足幅方向から投球方向を推定
-    stance_vector = (
-        np.mean(lead_ankles[:, 0] - pivot_ankles[:, 0])
+    # -----------------------------------------------------
+    # 投球方向
+    # -----------------------------------------------------
+
+    stance_vector = np.nanmedian(
+        lead_ankles[:, 0] -
+        pivot_ankles[:, 0]
     )
 
-    direction_sign = 1.0 if stance_vector >= 0 else -1.0
+    if stance_vector >= 0:
 
-    # =====================================================
-    # ① 骨盤・胸郭 並進
-    # =====================================================
+        direction_sign = 1.0
 
-    pelvis_x_m = pelvis_centers[:, 0] * scale
-    thorax_x_m = thorax_centers[:, 0] * scale
+    else:
 
-    # 投球方向を + とする
+        direction_sign = -1.0
+
+
+    # -----------------------------------------------------
+    # 骨盤並進
+    # -----------------------------------------------------
+
+    pelvis_x_m = (
+        pelvis_centers[:, 0] *
+        scale
+    )
+
+    thorax_x_m = (
+        thorax_centers[:, 0] *
+        scale
+    )
+
     pelvis_translation = (
-        pelvis_x_m * direction_sign
+        pelvis_x_m *
+        direction_sign
     )
 
     thorax_translation = (
-        thorax_x_m * direction_sign
+        thorax_x_m *
+        direction_sign
     )
 
     pelvis_velocity = velocity_1d(
@@ -627,15 +1009,19 @@ if uploaded_file is not None:
 
     pelvis_velocity = moving_average(
         pelvis_velocity,
-        5
+        smooth_window
     )
 
     thorax_velocity = moving_average(
         thorax_velocity,
-        5
+        smooth_window
     )
 
-    # 2D速度の大きさも保存
+
+    # -----------------------------------------------------
+    # 骨盤2D速度
+    # -----------------------------------------------------
+
     pelvis_vx = velocity_1d(
         pelvis_centers[:, 0] * scale,
         dt
@@ -651,76 +1037,261 @@ if uploaded_file is not None:
         pelvis_vy ** 2
     )
 
-    # =====================================================
-    # ② 骨盤回旋
-    # =====================================================
+    pelvis_speed_2d = moving_average(
+        pelvis_speed_2d,
+        smooth_window
+    )
 
-    pelvis_angles = np.array([
-        angle_2d(lh, rh)
-        for lh, rh
-        in zip(left_hips, right_hips)
-    ])
+
+    # -----------------------------------------------------
+    # 骨盤回旋
+    # -----------------------------------------------------
+
+    pelvis_angles = np.array(
+        [
+            angle_2d(
+                lh,
+                rh
+            )
+            for lh, rh in zip(
+                left_hips,
+                right_hips
+            )
+        ]
+    )
 
     pelvis_angles = unwrap_angle_deg(
         pelvis_angles
     )
 
-    pelvis_rotation_velocity = calculate_angular_velocity(
+    pelvis_rotation_velocity = np.gradient(
         pelvis_angles,
         dt
     )
 
     pelvis_rotation_velocity = moving_average(
         pelvis_rotation_velocity,
-        5
+        smooth_window
     )
 
-    # =====================================================
-    # ③ 胸郭回旋
-    # =====================================================
 
-    thorax_angles = np.array([
-        angle_2d(ls, rs)
-        for ls, rs
-        in zip(left_shoulders, right_shoulders)
-    ])
+    # -----------------------------------------------------
+    # 胸郭回旋
+    # -----------------------------------------------------
+
+    thorax_angles = np.array(
+        [
+            angle_2d(
+                ls,
+                rs
+            )
+            for ls, rs in zip(
+                left_shoulders,
+                right_shoulders
+            )
+        ]
+    )
 
     thorax_angles = unwrap_angle_deg(
         thorax_angles
     )
 
-    thorax_rotation_velocity = calculate_angular_velocity(
+    thorax_rotation_velocity = np.gradient(
         thorax_angles,
         dt
     )
 
     thorax_rotation_velocity = moving_average(
         thorax_rotation_velocity,
-        5
+        smooth_window
     )
 
-    # =====================================================
-    # ④ 骨盤 → 胸郭の separation
-    # =====================================================
+
+    # -----------------------------------------------------
+    # Separation
+    # -----------------------------------------------------
 
     trunk_separation = (
-        thorax_angles - pelvis_angles
+        thorax_angles -
+        pelvis_angles
     )
 
     trunk_separation = unwrap_angle_deg(
         trunk_separation
     )
 
+
     # =====================================================
-    # ⑤ 簡易GRF
+    # Foot Plant
     # =====================================================
 
-    # -----------------------------------------
-    # 骨盤の上下加速度
-    # -----------------------------------------
+    lead_y = lead_ankles[:, 1]
+
+    foot_plant_idx = find_foot_plant(
+        lead_y
+    )
+
+
+    # =====================================================
+    # 手首速度
+    # =====================================================
+
+    wrist_x_m = (
+        throwing_wrists[:, 0] *
+        scale
+    )
+
+    wrist_y_m = (
+        throwing_wrists[:, 1] *
+        scale
+    )
+
+    wrist_vx = velocity_1d(
+        wrist_x_m,
+        dt
+    )
+
+    wrist_vy = velocity_1d(
+        wrist_y_m,
+        dt
+    )
+
+    wrist_speed = np.sqrt(
+        wrist_vx ** 2 +
+        wrist_vy ** 2
+    )
+
+    wrist_speed = moving_average(
+        wrist_speed,
+        smooth_window
+    )
+
+
+    # =====================================================
+    # Release推定
+    # =====================================================
+
+    release_start = min(
+        foot_plant_idx + 1,
+        num_frames - 1
+    )
+
+    release_candidates = wrist_speed[
+        release_start:
+    ]
+
+    if len(release_candidates) > 0:
+
+        release_idx = (
+            release_start +
+            int(
+                np.nanargmax(
+                    release_candidates
+                )
+            )
+        )
+
+    else:
+
+        release_idx = (
+            num_frames - 1
+        )
+
+
+    # =====================================================
+    # MER
+    # =====================================================
+
+    elbow_angles = np.array(
+        [
+            calculate_elbow_angle(
+                s,
+                e,
+                w
+            )
+            for s, e, w in zip(
+                throwing_shoulders,
+                throwing_elbows,
+                throwing_wrists
+            )
+        ]
+    )
+
+    elbow_angles = moving_average(
+        elbow_angles,
+        smooth_window
+    )
+
+    mer_start = min(
+        foot_plant_idx,
+        num_frames - 1
+    )
+
+    mer_end = min(
+        max(
+            release_idx,
+            mer_start + 1
+        ),
+        num_frames - 1
+    )
+
+    if mer_end >= mer_start:
+
+        mer_values = elbow_angles[
+            mer_start:
+            mer_end + 1
+        ]
+
+        if np.any(
+            np.isfinite(
+                mer_values
+            )
+        ):
+
+            mer_idx = (
+                mer_start +
+                int(
+                    np.nanargmax(
+                        mer_values
+                    )
+                )
+            )
+
+        else:
+
+            mer_idx = mer_start
+
+    else:
+
+        mer_idx = mer_start
+
+    mer_angle = float(
+        elbow_angles[mer_idx]
+    )
+
+
+    # =====================================================
+    # Step Width
+    # =====================================================
+
+    step_width_px = distance_2d(
+        lead_ankles[foot_plant_idx],
+        pivot_ankles[foot_plant_idx]
+    )
+
+    step_width_m = (
+        step_width_px *
+        scale
+    )
+
+
+    # =====================================================
+    # 擬似GRF
+    # =====================================================
 
     pelvis_y_m = (
-        pelvis_centers[:, 1] * scale
+        pelvis_centers[:, 1] *
+        scale
     )
 
     pelvis_vy_m = velocity_1d(
@@ -735,15 +1306,13 @@ if uploaded_file is not None:
 
     pelvis_ay = moving_average(
         pelvis_ay,
-        5
+        smooth_window
     )
 
-    # 画像yは下方向が+
-    vertical_acceleration_up = -pelvis_ay
-
-    # -----------------------------------------
-    # 擬似GRF
-    # -----------------------------------------
+    # 画像座標Yの下方向が+
+    vertical_acceleration_up = (
+        -pelvis_ay
+    )
 
     pseudo_grf = (
         user_weight *
@@ -758,212 +1327,99 @@ if uploaded_file is not None:
         0
     )
 
-    # -----------------------------------------
-    # 体重比
-    # -----------------------------------------
+    pseudo_grf = moving_average(
+        pseudo_grf,
+        smooth_window
+    )
 
     pseudo_grf_bw = (
         pseudo_grf /
-        (user_weight * GRAVITY)
-    )
-
-    # =====================================================
-    # ⑥ Foot Plant
-    # =====================================================
-
-    lead_y = lead_ankles[:, 1]
-
-    foot_plant_idx = find_foot_plant(
-        lead_y,
-        fps
-    )
-
-    # =====================================================
-    # ⑦ MER
-    # =====================================================
-
-    # 肘角度
-    # shoulder -> elbow
-    # wrist -> elbow
-
-    elbow_angles = []
-
-    for s, e, w in zip(
-        throwing_shoulders,
-        throwing_elbows,
-        throwing_wrists
-    ):
-
-        v1 = s - e
-        v2 = w - e
-
-        norm1 = np.linalg.norm(v1)
-        norm2 = np.linalg.norm(v2)
-
-        if norm1 < 1e-6 or norm2 < 1e-6:
-            elbow_angles.append(np.nan)
-            continue
-
-        cos_theta = np.dot(v1, v2) / (
-            norm1 * norm2
+        (
+            user_weight *
+            GRAVITY
         )
-
-        cos_theta = np.clip(
-            cos_theta,
-            -1,
-            1
-        )
-
-        theta = np.degrees(
-            np.arccos(cos_theta)
-        )
-
-        elbow_angles.append(theta)
-
-    elbow_angles = np.array(
-        elbow_angles
     )
 
-    elbow_angles = moving_average(
-        elbow_angles,
-        5
-    )
-
-    # -----------------------------------------
-    # Releaseの簡易推定
-    # 手首速度ピーク
-    # -----------------------------------------
-
-    wrist_x = (
-        throwing_wrists[:, 0] * scale
-    )
-
-    wrist_y = (
-        throwing_wrists[:, 1] * scale
-    )
-
-    wrist_vx = velocity_1d(
-        wrist_x,
-        dt
-    )
-
-    wrist_vy = velocity_1d(
-        wrist_y,
-        dt
-    )
-
-    wrist_speed = np.sqrt(
-        wrist_vx ** 2 +
-        wrist_vy ** 2
-    )
-
-    wrist_speed = moving_average(
-        wrist_speed,
-        5
-    )
-
-    # Plantより後のピーク
-    release_start = min(
-        foot_plant_idx + 1,
-        num_frames - 1
-    )
-
-    release_idx = release_start + np.argmax(
-        wrist_speed[
-            release_start:
-        ]
-    )
-
-    # MER候補
-    # FC ～ Releaseの間で肘角最大
-    mer_start = foot_plant_idx
-    mer_end = max(
-        release_idx,
-        mer_start + 1
-    )
-
-    if mer_end > mer_start:
-
-        mer_relative_idx = np.argmax(
-            elbow_angles[
-                mer_start:
-                mer_end + 1
-            ]
-        )
-
-        mer_idx = (
-            mer_start +
-            mer_relative_idx
-        )
-
-    else:
-
-        mer_idx = foot_plant_idx
-
-    mer_angle = elbow_angles[mer_idx]
 
     # =====================================================
-    # ⑧ Step Width
+    # 最大値
     # =====================================================
 
-    step_width_px = distance_2d(
-        lead_ankles[foot_plant_idx],
-        pivot_ankles[foot_plant_idx]
+    max_pelvis_velocity = float(
+        np.nanmax(
+            np.abs(
+                pelvis_velocity
+            )
+        )
     )
 
-    step_width_m = (
-        step_width_px * scale
+    max_thorax_velocity = float(
+        np.nanmax(
+            np.abs(
+                thorax_velocity
+            )
+        )
     )
+
+    max_pelvis_rotation = float(
+        np.nanmax(
+            np.abs(
+                pelvis_rotation_velocity
+            )
+        )
+    )
+
+    max_thorax_rotation = float(
+        np.nanmax(
+            np.abs(
+                thorax_rotation_velocity
+            )
+        )
+    )
+
+    max_pseudo_grf = float(
+        np.nanmax(
+            pseudo_grf
+        )
+    )
+
+    max_pseudo_grf_bw = float(
+        np.nanmax(
+            pseudo_grf_bw
+        )
+    )
+
+    max_wrist_speed = float(
+        np.nanmax(
+            wrist_speed
+        )
+    )
+
 
     # =====================================================
-    # 数値結果
+    # Time
     # =====================================================
 
-    max_pelvis_velocity = np.max(
-        np.abs(pelvis_velocity)
+    times = (
+        np.arange(
+            num_frames
+        ) * dt
     )
 
-    max_thorax_velocity = np.max(
-        np.abs(thorax_velocity)
-    )
-
-    max_pelvis_rotation = np.max(
-        np.abs(pelvis_rotation_velocity)
-    )
-
-    max_thorax_rotation = np.max(
-        np.abs(thorax_rotation_velocity)
-    )
-
-    max_pseudo_grf = np.max(
-        pseudo_grf
-    )
-
-    max_pseudo_grf_bw = np.max(
-        pseudo_grf_bw
-    )
-
-    max_wrist_speed = np.max(
-        wrist_speed
-    )
 
     # =====================================================
     # DataFrame
     # =====================================================
-
-    times = np.arange(
-        num_frames
-    ) * dt
 
     df = pd.DataFrame({
 
         "Time_s":
         times,
 
-        "Pelvis_X_m":
+        "Pelvis_Translation_m":
         pelvis_translation,
 
-        "Thorax_X_m":
+        "Thorax_Translation_m":
         thorax_translation,
 
         "Pelvis_Translation_Velocity_m_s":
@@ -987,33 +1443,40 @@ if uploaded_file is not None:
         "Trunk_Separation_deg":
         trunk_separation,
 
-        "Pelvis_Vertical_Acceleration_m_s2":
-        vertical_acceleration_up,
+        "Wrist_Speed_m_s":
+        wrist_speed,
+
+        "Elbow_Angle_2D_deg":
+        elbow_angles,
 
         "Pseudo_GRF_N":
         pseudo_grf,
 
         "Pseudo_GRF_BW":
-        pseudo_grf_bw,
-
-        "Wrist_Speed_m_s":
-        wrist_speed,
-
-        "Elbow_Angle_deg":
-        elbow_angles
+        pseudo_grf_bw
 
     })
 
+
     # =====================================================
     # PASS 4
-    # 動画描画
+    # 解析動画
     # =====================================================
 
-    st.info("② 解析動画生成中...")
+    st.subheader(
+        "③ 解析動画生成"
+    )
 
-    skeleton_connections = mp_pose.POSE_CONNECTIONS
+    video_progress = st.progress(
+        0
+    )
 
-    for i, frame in enumerate(frames):
+    # 手首軌道を過去フレーム分保持
+    wrist_trail = []
+
+    for i, frame in enumerate(
+        frames
+    ):
 
         draw_frame = frame.copy()
 
@@ -1021,173 +1484,230 @@ if uploaded_file is not None:
             frame
         )
 
-        # -------------------------------------------------
-        # 骨格
-        # -------------------------------------------------
 
-        points = {
-            "LH": left_hips[i],
-            "RH": right_hips[i],
-            "LS": left_shoulders[i],
-            "RS": right_shoulders[i],
-            "TS": throwing_shoulders[i],
-            "TE": throwing_elbows[i],
-            "TW": throwing_wrists[i],
-            "PA": pivot_ankles[i],
-            "LA": lead_ankles[i],
-            "P": pelvis_centers[i],
-            "T": thorax_centers[i]
-        }
+        # =================================================
+        # 現在座標
+        # =================================================
 
-        # -------------------------------------------------
-        # Pelvis
-        # -------------------------------------------------
-
-        p = tuple(
-            np.int32(
-                np.round(
-                    pelvis_centers[i]
-                )
-            )
+        pelvis_pt = safe_int_point(
+            pelvis_centers[i]
         )
+
+        thorax_pt = safe_int_point(
+            thorax_centers[i]
+        )
+
+        ts_pt = safe_int_point(
+            throwing_shoulders[i]
+        )
+
+        te_pt = safe_int_point(
+            throwing_elbows[i]
+        )
+
+        tw_pt = safe_int_point(
+            throwing_wrists[i]
+        )
+
+        pa_pt = safe_int_point(
+            pivot_ankles[i]
+        )
+
+        la_pt = safe_int_point(
+            lead_ankles[i]
+        )
+
+
+        # =================================================
+        # 投球腕
+        # =================================================
+
+        cv2.line(
+            draw_frame,
+            ts_pt,
+            te_pt,
+            (0, 255, 255),
+            4
+        )
+
+        cv2.line(
+            draw_frame,
+            te_pt,
+            tw_pt,
+            (0, 255, 255),
+            4
+        )
+
+        cv2.line(
+            black_frame,
+            ts_pt,
+            te_pt,
+            (0, 255, 255),
+            4
+        )
+
+        cv2.line(
+            black_frame,
+            te_pt,
+            tw_pt,
+            (0, 255, 255),
+            4
+        )
+
+
+        # =================================================
+        # 骨盤
+        # =================================================
 
         cv2.circle(
             draw_frame,
-            p,
-            10,
+            pelvis_pt,
+            11,
             (255, 0, 0),
             -1
         )
 
         cv2.circle(
             black_frame,
-            p,
-            10,
+            pelvis_pt,
+            11,
             (255, 0, 0),
             -1
         )
 
-        # -------------------------------------------------
-        # Thorax
-        # -------------------------------------------------
 
-        t = tuple(
-            np.int32(
-                np.round(
-                    thorax_centers[i]
-                )
-            )
-        )
+        # =================================================
+        # 胸郭
+        # =================================================
 
         cv2.circle(
             draw_frame,
-            t,
-            10,
+            thorax_pt,
+            11,
             (0, 255, 0),
             -1
         )
 
         cv2.circle(
             black_frame,
-            t,
-            10,
+            thorax_pt,
+            11,
             (0, 255, 0),
             -1
         )
 
-        # -------------------------------------------------
-        # Throwing Arm
-        # -------------------------------------------------
 
-        ts = tuple(
-            np.int32(
-                np.round(
-                    throwing_shoulders[i]
-                )
-            )
-        )
+        # =================================================
+        # 足
+        # =================================================
 
-        te = tuple(
-            np.int32(
-                np.round(
-                    throwing_elbows[i]
-                )
-            )
-        )
-
-        tw = tuple(
-            np.int32(
-                np.round(
-                    throwing_wrists[i]
-                )
-            )
-        )
-
-        cv2.line(
+        cv2.circle(
             draw_frame,
-            ts,
-            te,
-            (0, 255, 255),
-            4
+            pa_pt,
+            7,
+            (255, 255, 0),
+            -1
         )
 
-        cv2.line(
+        cv2.circle(
             draw_frame,
-            te,
-            tw,
-            (0, 255, 255),
-            4
+            la_pt,
+            7,
+            (255, 255, 0),
+            -1
         )
 
-        cv2.line(
-            black_frame,
-            ts,
-            te,
-            (0, 255, 255),
-            4
+
+        # =================================================
+        # 手首軌道
+        # =================================================
+
+        wrist_trail.append(
+            tw_pt
         )
 
-        cv2.line(
-            black_frame,
-            te,
-            tw,
-            (0, 255, 255),
-            4
-        )
+        if len(wrist_trail) > 0:
 
-        # -------------------------------------------------
-        # 軌道
-        # -------------------------------------------------
+            for k in range(
+                1,
+                len(wrist_trail)
+            ):
 
-        if i > 1:
-
-            prev_p = tuple(
-                np.int32(
-                    np.round(
-                        pelvis_centers[i - 1]
-                    )
+                cv2.line(
+                    draw_frame,
+                    wrist_trail[k - 1],
+                    wrist_trail[k],
+                    (0, 0, 255),
+                    3
                 )
+
+                cv2.line(
+                    black_frame,
+                    wrist_trail[k - 1],
+                    wrist_trail[k],
+                    (0, 0, 255),
+                    3
+                )
+
+
+        # =================================================
+        # 骨盤軌道
+        # =================================================
+
+        if i > 0:
+
+            prev_pelvis = safe_int_point(
+                pelvis_centers[i - 1]
             )
 
             cv2.line(
                 draw_frame,
-                prev_p,
-                p,
+                prev_pelvis,
+                pelvis_pt,
                 (255, 0, 0),
                 3
             )
 
             cv2.line(
                 black_frame,
-                prev_p,
-                p,
+                prev_pelvis,
+                pelvis_pt,
                 (255, 0, 0),
                 3
             )
 
-        # -------------------------------------------------
-        # MER frame
-        # -------------------------------------------------
+
+        # =================================================
+        # Foot Plant表示
+        # =================================================
+
+        if i == foot_plant_idx:
+
+            cv2.line(
+                draw_frame,
+                pa_pt,
+                la_pt,
+                (255, 0, 255),
+                5
+            )
+
+            cv2.putText(
+                draw_frame,
+                "FOOT PLANT",
+                (
+                    la_pt[0] + 10,
+                    la_pt[1] - 20
+                ),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 0, 255),
+                2
+            )
+
+
+        # =================================================
+        # MER表示
+        # =================================================
 
         if i == mer_idx:
 
@@ -1195,12 +1715,8 @@ if uploaded_file is not None:
                 draw_frame,
                 "MER",
                 (
-                    int(
-                        throwing_wrists[i][0]
-                    ) + 10,
-                    int(
-                        throwing_wrists[i][1]
-                    )
+                    tw_pt[0] + 10,
+                    tw_pt[1] - 10
                 ),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
@@ -1208,112 +1724,76 @@ if uploaded_file is not None:
                 2
             )
 
-        # -------------------------------------------------
-        # Foot Plant
-        # -------------------------------------------------
 
-        if i == foot_plant_idx:
+        # =================================================
+        # Release表示
+        # =================================================
+
+        if i == release_idx:
 
             cv2.putText(
                 draw_frame,
-                "FOOT PLANT",
+                "RELEASE",
                 (
-                    int(
-                        lead_ankles[i][0]
-                    ),
-                    int(
-                        lead_ankles[i][1] - 20
-                    )
+                    tw_pt[0] + 10,
+                    tw_pt[1] + 25
                 ),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.8,
                 (0, 255, 0),
                 2
             )
 
-            cv2.line(
+
+        # =================================================
+        # 画面情報
+        # =================================================
+
+        info_lines = [
+
+            f"Time       : {times[i]:.3f} s",
+
+            f"Pelvis Vel : "
+            f"{pelvis_velocity[i]:.2f} m/s",
+
+            f"Thorax Vel : "
+            f"{thorax_velocity[i]:.2f} m/s",
+
+            f"Pelvis Rot : "
+            f"{pelvis_rotation_velocity[i]:.0f} deg/s",
+
+            f"Thorax Rot : "
+            f"{thorax_rotation_velocity[i]:.0f} deg/s",
+
+            f"Wrist Vel  : "
+            f"{wrist_speed[i]:.2f} m/s",
+
+            f"Pseudo GRF : "
+            f"{pseudo_grf[i]:.0f} N"
+
+        ]
+
+        for j, text in enumerate(
+            info_lines
+        ):
+
+            cv2.putText(
                 draw_frame,
-                tuple(
-                    np.int32(
-                        np.round(
-                            pivot_ankles[i]
-                        )
-                    )
+                text,
+                (
+                    30,
+                    35 + j * 28
                 ),
-                tuple(
-                    np.int32(
-                        np.round(
-                            lead_ankles[i]
-                        )
-                    )
-                ),
-                (255, 0, 255),
-                4
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                (255, 255, 255),
+                2
             )
 
-        # -------------------------------------------------
-        # 情報表示
-        # -------------------------------------------------
 
-        cv2.putText(
-            draw_frame,
-            f"Pelvis Vel : {pelvis_velocity[i]:.2f} m/s",
-            (30, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            draw_frame,
-            f"Thorax Vel : {thorax_velocity[i]:.2f} m/s",
-            (30, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            draw_frame,
-            f"Pelvis Rot : {pelvis_rotation_velocity[i]:.1f} deg/s",
-            (30, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            draw_frame,
-            f"Thorax Rot : {thorax_rotation_velocity[i]:.1f} deg/s",
-            (30, 130),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            draw_frame,
-            f"MER : {elbow_angles[i]:.1f} deg",
-            (30, 160),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            draw_frame,
-            f"Pseudo GRF : {pseudo_grf[i]:.0f} N",
-            (30, 190),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
+        # =================================================
+        # 出力
+        # =================================================
 
         out_overlay.write(
             draw_frame
@@ -1325,7 +1805,7 @@ if uploaded_file is not None:
 
         if i % 5 == 0:
 
-            progress_bar.progress(
+            video_progress.progress(
                 min(
                     (i + 1) /
                     num_frames,
@@ -1333,16 +1813,27 @@ if uploaded_file is not None:
                 )
             )
 
+
     out_overlay.release()
     out_skeleton.release()
 
-    st.success("解析完了！")
 
     # =====================================================
-    # 数値表示
+    # 完了
     # =====================================================
 
-    st.subheader("📊 ピッチング指標")
+    st.success(
+        "解析が完了しました！"
+    )
+
+
+    # =====================================================
+    # 指標
+    # =====================================================
+
+    st.subheader(
+        "📊 ピッチング指標"
+    )
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -1366,6 +1857,7 @@ if uploaded_file is not None:
         f"{max_thorax_rotation:.0f} °/s"
     )
 
+
     c5, c6, c7, c8 = st.columns(4)
 
     c5.metric(
@@ -1388,21 +1880,14 @@ if uploaded_file is not None:
         f"{max_pseudo_grf:.0f} N"
     )
 
-    st.caption(
-        "※ GRFは骨盤鉛直加速度から算出した擬似GRFです。"
-        "フォースプレート等による実測地面反力ではありません。"
-    )
-
-    st.caption(
-        "※ MERは2D動画からの外旋角度推定値です。"
-        "真の肩関節外旋角度を取得するには3D計測が必要です。"
-    )
 
     # =====================================================
-    # Event
+    # イベント
     # =====================================================
 
-    st.subheader("📍 イベント")
+    st.subheader(
+        "📍 イベント"
+    )
 
     e1, e2, e3 = st.columns(3)
 
@@ -1417,20 +1902,37 @@ if uploaded_file is not None:
     )
 
     e3.metric(
-        "Release推定",
+        "Release",
         f"{times[release_idx]:.3f} s"
     )
 
+
     # =====================================================
-    # 動画
+    # 注意事項
     # =====================================================
+
+    st.warning(
+        "この解析は2D動画からの推定です。"
+        "骨盤・胸郭回旋速度は画像面内の回旋、"
+        "MERは2Dの肘角度を利用したProxy、"
+        "GRFは実測値ではなく骨盤鉛直加速度から算出したPseudo GRFです。"
+    )
+
+
+    # =====================================================
+    # 動画表示
+    # =====================================================
+
+    st.subheader(
+        "📹 解析動画"
+    )
 
     col1, col2 = st.columns(2)
 
     with col1:
 
-        st.subheader(
-            "📹 実動画 + 解析"
+        st.write(
+            "実動画 + 解析"
         )
 
         st.video(
@@ -1439,17 +1941,18 @@ if uploaded_file is not None:
 
     with col2:
 
-        st.subheader(
-            "🦴 骨格・軌道"
+        st.write(
+            "軌道・骨格"
         )
 
         st.video(
             out_skeleton_path
         )
 
+
     # =====================================================
     # Graph 1
-    # 並進速度
+    # 並進
     # =====================================================
 
     st.subheader(
@@ -1477,15 +1980,27 @@ if uploaded_file is not None:
     )
 
     fig1.add_vline(
-        x=times[foot_plant_idx],
+        x=times[
+            foot_plant_idx
+        ],
         line_dash="dash",
         annotation_text="Foot Plant"
     )
 
     fig1.add_vline(
-        x=times[mer_idx],
+        x=times[
+            mer_idx
+        ],
         line_dash="dash",
         annotation_text="MER"
+    )
+
+    fig1.add_vline(
+        x=times[
+            release_idx
+        ],
+        line_dash="dot",
+        annotation_text="Release"
     )
 
     fig1.update_layout(
@@ -1500,9 +2015,10 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
+
     # =====================================================
     # Graph 2
-    # 回旋速度
+    # 回旋
     # =====================================================
 
     st.subheader(
@@ -1530,15 +2046,27 @@ if uploaded_file is not None:
     )
 
     fig2.add_vline(
-        x=times[foot_plant_idx],
+        x=times[
+            foot_plant_idx
+        ],
         line_dash="dash",
         annotation_text="Foot Plant"
     )
 
     fig2.add_vline(
-        x=times[mer_idx],
+        x=times[
+            mer_idx
+        ],
         line_dash="dash",
         annotation_text="MER"
+    )
+
+    fig2.add_vline(
+        x=times[
+            release_idx
+        ],
+        line_dash="dot",
+        annotation_text="Release"
     )
 
     fig2.update_layout(
@@ -1553,6 +2081,7 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
+
     # =====================================================
     # Graph 3
     # Separation
@@ -1574,13 +2103,17 @@ if uploaded_file is not None:
     )
 
     fig3.add_vline(
-        x=times[foot_plant_idx],
+        x=times[
+            foot_plant_idx
+        ],
         line_dash="dash",
         annotation_text="Foot Plant"
     )
 
     fig3.add_vline(
-        x=times[mer_idx],
+        x=times[
+            mer_idx
+        ],
         line_dash="dash",
         annotation_text="MER"
     )
@@ -1597,13 +2130,14 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
+
     # =====================================================
     # Graph 4
     # MER
     # =====================================================
 
     st.subheader(
-        "🦾 投球腕 2D外旋推定"
+        "🦾 投球腕 2D角度"
     )
 
     fig4 = go.Figure()
@@ -1613,14 +2147,18 @@ if uploaded_file is not None:
             x=times,
             y=elbow_angles,
             mode="lines",
-            name="2D MER Proxy"
+            name="Elbow Angle"
         )
     )
 
     fig4.add_trace(
         go.Scatter(
-            x=[times[mer_idx]],
-            y=[elbow_angles[mer_idx]],
+            x=[
+                times[mer_idx]
+            ],
+            y=[
+                elbow_angles[mer_idx]
+            ],
             mode="markers+text",
             text=["MER"],
             textposition="top center",
@@ -1630,7 +2168,7 @@ if uploaded_file is not None:
 
     fig4.update_layout(
         xaxis_title="Time (s)",
-        yaxis_title="Arm Angle (deg)",
+        yaxis_title="Elbow Angle (deg)",
         height=350,
         template="plotly_dark"
     )
@@ -1640,13 +2178,14 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
+
     # =====================================================
     # Graph 5
-    # Pseudo GRF
+    # 手首速度
     # =====================================================
 
     st.subheader(
-        "🦶 擬似地面反力"
+        "🖐️ 手首速度"
     )
 
     fig5 = go.Figure()
@@ -1654,154 +2193,31 @@ if uploaded_file is not None:
     fig5.add_trace(
         go.Scatter(
             x=times,
-            y=pseudo_grf,
+            y=wrist_speed,
             mode="lines",
-            name="Pseudo GRF"
+            name="Wrist Speed"
         )
     )
 
-    fig5.update_layout(
-        xaxis_title="Time (s)",
-        yaxis_title="Force (N)",
-        height=350,
-        template="plotly_dark"
-    )
-
-    st.plotly_chart(
-        fig5,
-        use_container_width=True
-    )
-
-    # =====================================================
-    # CSV download
-    # =====================================================
-
-    csv_data = df.to_csv(
-        index=False
-    ).encode("utf-8-sig")
-
-    st.download_button(
-        label="📥 解析データCSVをダウンロード",
-        data=csv_data,
-        file_name="pitching_analysis.csv",
-        mime="text/csv"
-    )
-
-    # =====================================================
-    # Graph 3
-    # Separation
-    # =====================================================
-
-       # =====================================================
-    # Graph 3
-    # Separation
-    # =====================================================
-
-    st.subheader(
-        "↔️ 骨盤−胸郭 Separation"
-    )
-
-    fig3 = go.Figure()
-
-    fig3.add_trace(
-        go.Scatter(
-            x=times,
-            y=trunk_separation,
-            mode="lines",
-            name="Pelvis-Thorax"
-        )
-    )
-
-    fig3.add_vline(
-        x=times[foot_plant_idx],
+    fig5.add_vline(
+        x=times[
+            foot_plant_idx
+        ],
         line_dash="dash",
         annotation_text="Foot Plant"
     )
 
-    fig3.add_vline(
-        x=times[mer_idx],
-        line_dash="dash",
-        annotation_text="MER"
-    )
-
-    fig3.update_layout(
-        xaxis_title="Time (s)",
-        yaxis_title="Separation Angle (deg)",
-        height=350,
-        template="plotly_dark"
-    )
-
-    st.plotly_chart(
-        fig3,
-        use_container_width=True
-    )
-
-    # =====================================================
-    # Graph 4
-    # MER
-    # =====================================================
-
-    st.subheader(
-        "🦾 投球腕 2D外旋推定"
-    )
-
-    fig4 = go.Figure()
-
-    fig4.add_trace(
-        go.Scatter(
-            x=times,
-            y=elbow_angles,
-            mode="lines",
-            name="2D MER Proxy"
-        )
-    )
-
-    fig4.add_trace(
-        go.Scatter(
-            x=[times[mer_idx]],
-            y=[elbow_angles[mer_idx]],
-            mode="markers+text",
-            text=["MER"],
-            textposition="top center",
-            name="MER"
-        )
-    )
-
-    fig4.update_layout(
-        xaxis_title="Time (s)",
-        yaxis_title="Arm Angle (deg)",
-        height=350,
-        template="plotly_dark"
-    )
-
-    st.plotly_chart(
-        fig4,
-        use_container_width=True
-    )
-
-    # =====================================================
-    # Graph 5
-    # Pseudo GRF
-    # =====================================================
-
-    st.subheader(
-        "🦶 擬似地面反力"
-    )
-
-    fig5 = go.Figure()
-
-    fig5.add_trace(
-        go.Scatter(
-            x=times,
-            y=pseudo_grf,
-            mode="lines",
-            name="Pseudo GRF"
-        )
+    fig5.add_vline(
+        x=times[
+            release_idx
+        ],
+        line_dash="dot",
+        annotation_text="Release"
     )
 
     fig5.update_layout(
         xaxis_title="Time (s)",
-        yaxis_title="Force (N)",
+        yaxis_title="Wrist Speed (m/s)",
         height=350,
         template="plotly_dark"
     )
@@ -1811,16 +2227,56 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
+
     # =====================================================
-    # CSV download
+    # Graph 6
+    # 擬似GRF
     # =====================================================
+
+    st.subheader(
+        "🦶 擬似地面反力"
+    )
+
+    fig6 = go.Figure()
+
+    fig6.add_trace(
+        go.Scatter(
+            x=times,
+            y=pseudo_grf,
+            mode="lines",
+            name="Pseudo GRF"
+        )
+    )
+
+    fig6.update_layout(
+        xaxis_title="Time (s)",
+        yaxis_title="Force (N)",
+        height=350,
+        template="plotly_dark"
+    )
+
+    st.plotly_chart(
+        fig6,
+        use_container_width=True
+    )
+
+
+    # =====================================================
+    # CSV
+    # =====================================================
+
+    st.subheader(
+        "📥 解析データ"
+    )
 
     csv_data = df.to_csv(
         index=False
-    ).encode("utf-8-sig")
+    ).encode(
+        "utf-8-sig"
+    )
 
     st.download_button(
-        label="📥 解析データCSVをダウンロード",
+        label="CSVをダウンロード",
         data=csv_data,
         file_name="pitching_analysis.csv",
         mime="text/csv"
