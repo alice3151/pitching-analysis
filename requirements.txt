@@ -1,6 +1,6 @@
 streamlit
 opencv-python-headless
-mediapipe>=0.10.0,<0.10.15
 numpy
+pandas
 plotly
-scipy
+mediapipe
