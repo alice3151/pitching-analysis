@@ -1556,7 +1556,7 @@ st.plotly_chart(
     # Separation
     # =====================================================
 
-    st.subheader(
+    　st.subheader(
         "↔️ 骨盤−胸郭 Separation"
     )
 
