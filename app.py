@@ -1500,55 +1500,56 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
-    # =====================================================
-    # Graph 2
-    # 回旋速度
-    # =====================================================
+  # =====================================================
+# Graph 2
+# 回旋速度
+# =====================================================
 
-    st.subheader(
-        "🔄 骨盤・胸郭 回旋速度"
+st.subheader(
+    "🔄 骨盤・胸郭 回旋速度"
+)
+
+fig2 = go.Figure()
+
+fig2.add_trace(
+    go.Scatter(
+        x=times,
+        y=pelvis_rotation_velocity,
+        mode="lines",
+        name="Pelvis Rotation"
     )
+)
 
-    fig2 = go.Figure()
-
-    fig2.add_trace(
-        go.Scatter(
-            x=times,
-            y=pelvis_rotation_velocity,
-            mode="lines",
-            name="Pelvis Rotation"
-        )
+fig2.add_trace(
+    go.Scatter(
+        x=times,
+        y=thorax_rotation_velocity,
+        mode="lines",
+        name="Thorax Rotation"
     )
+)
 
-    fig2.add_trace(
-        go.Scatter(
-            x=times,
-            y=thorax_rotation_velocity,
-            mode="lines",
-            name="Thorax Rotation"
-        )
+fig2.add_vline(
+    x=times[foot_plant_idx],
+    line_dash="dash"
+)
 
-    fig2.add_vline(
-        x=times[foot_plant_idx],
-        line_dash="dash"
-    )
+fig2.add_vline(
+    x=times[mer_idx],
+    line_dash="dash"
+)
 
-    fig2.add_vline(
-        x=times[mer_idx],
-        line_dash="dash"
-    )
+fig2.update_layout(
+    xaxis_title="Time (s)",
+    yaxis_title="Angular Velocity (deg/s)",
+    height=400,
+    template="plotly_dark"
+)
 
-    fig2.update_layout(
-        xaxis_title="Time (s)",
-        yaxis_title="Angular Velocity (deg/s)",
-        height=400,
-        template="plotly_dark"
-    )
-
-    st.plotly_chart(
-        fig2,
-        use_container_width=True
-    )
+st.plotly_chart(
+    fig2,
+    use_container_width=True
+)
 
     # =====================================================
     # Graph 3
