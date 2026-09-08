@@ -1500,56 +1500,192 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
-  # =====================================================
-# Graph 2
-# 回旋速度
-# =====================================================
+    # =====================================================
+    # Graph 2
+    # 回旋速度
+    # =====================================================
 
-st.subheader(
-    "🔄 骨盤・胸郭 回旋速度"
-)
-
-fig2 = go.Figure()
-
-fig2.add_trace(
-    go.Scatter(
-        x=times,
-        y=pelvis_rotation_velocity,
-        mode="lines",
-        name="Pelvis Rotation"
+    st.subheader(
+        "🔄 骨盤・胸郭 回旋速度"
     )
-)
 
-fig2.add_trace(
-    go.Scatter(
-        x=times,
-        y=thorax_rotation_velocity,
-        mode="lines",
-        name="Thorax Rotation"
+    fig2 = go.Figure()
+
+    fig2.add_trace(
+        go.Scatter(
+            x=times,
+            y=pelvis_rotation_velocity,
+            mode="lines",
+            name="Pelvis Rotation"
+        )
     )
-)
 
-fig2.add_vline(
-    x=times[foot_plant_idx],
-    line_dash="dash"
-)
+    fig2.add_trace(
+        go.Scatter(
+            x=times,
+            y=thorax_rotation_velocity,
+            mode="lines",
+            name="Thorax Rotation"
+        )
+    )
 
-fig2.add_vline(
-    x=times[mer_idx],
-    line_dash="dash"
-)
+    fig2.add_vline(
+        x=times[foot_plant_idx],
+        line_dash="dash",
+        annotation_text="Foot Plant"
+    )
 
-fig2.update_layout(
-    xaxis_title="Time (s)",
-    yaxis_title="Angular Velocity (deg/s)",
-    height=400,
-    template="plotly_dark"
-)
+    fig2.add_vline(
+        x=times[mer_idx],
+        line_dash="dash",
+        annotation_text="MER"
+    )
 
-st.plotly_chart(
-    fig2,
-    use_container_width=True
-)
+    fig2.update_layout(
+        xaxis_title="Time (s)",
+        yaxis_title="Angular Velocity (deg/s)",
+        height=400,
+        template="plotly_dark"
+    )
+
+    st.plotly_chart(
+        fig2,
+        use_container_width=True
+    )
+
+    # =====================================================
+    # Graph 3
+    # Separation
+    # =====================================================
+
+    st.subheader(
+        "↔️ 骨盤−胸郭 Separation"
+    )
+
+    fig3 = go.Figure()
+
+    fig3.add_trace(
+        go.Scatter(
+            x=times,
+            y=trunk_separation,
+            mode="lines",
+            name="Pelvis-Thorax"
+        )
+    )
+
+    fig3.add_vline(
+        x=times[foot_plant_idx],
+        line_dash="dash",
+        annotation_text="Foot Plant"
+    )
+
+    fig3.add_vline(
+        x=times[mer_idx],
+        line_dash="dash",
+        annotation_text="MER"
+    )
+
+    fig3.update_layout(
+        xaxis_title="Time (s)",
+        yaxis_title="Separation Angle (deg)",
+        height=350,
+        template="plotly_dark"
+    )
+
+    st.plotly_chart(
+        fig3,
+        use_container_width=True
+    )
+
+    # =====================================================
+    # Graph 4
+    # MER
+    # =====================================================
+
+    st.subheader(
+        "🦾 投球腕 2D外旋推定"
+    )
+
+    fig4 = go.Figure()
+
+    fig4.add_trace(
+        go.Scatter(
+            x=times,
+            y=elbow_angles,
+            mode="lines",
+            name="2D MER Proxy"
+        )
+    )
+
+    fig4.add_trace(
+        go.Scatter(
+            x=[times[mer_idx]],
+            y=[elbow_angles[mer_idx]],
+            mode="markers+text",
+            text=["MER"],
+            textposition="top center",
+            name="MER"
+        )
+    )
+
+    fig4.update_layout(
+        xaxis_title="Time (s)",
+        yaxis_title="Arm Angle (deg)",
+        height=350,
+        template="plotly_dark"
+    )
+
+    st.plotly_chart(
+        fig4,
+        use_container_width=True
+    )
+
+    # =====================================================
+    # Graph 5
+    # Pseudo GRF
+    # =====================================================
+
+    st.subheader(
+        "🦶 擬似地面反力"
+    )
+
+    fig5 = go.Figure()
+
+    fig5.add_trace(
+        go.Scatter(
+            x=times,
+            y=pseudo_grf,
+            mode="lines",
+            name="Pseudo GRF"
+        )
+    )
+
+    fig5.update_layout(
+        xaxis_title="Time (s)",
+        yaxis_title="Force (N)",
+        height=350,
+        template="plotly_dark"
+    )
+
+    st.plotly_chart(
+        fig5,
+        use_container_width=True
+    )
+
+    # =====================================================
+    # CSV download
+    # =====================================================
+
+    csv_data = df.to_csv(
+        index=False
+    ).encode("utf-8-sig")
+
+    st.download_button(
+        label="📥 解析データCSVをダウンロード",
+        data=csv_data,
+        file_name="pitching_analysis.csv",
+        mime="text/csv"
+    )
 
     # =====================================================
     # Graph 3
